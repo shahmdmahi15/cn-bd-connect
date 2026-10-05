@@ -140,11 +140,9 @@ export function CallScreen({
     }
 
     if (remoteVideoRef.current && remoteStream) {
-      // In video call, attempt to play unmuted through video element
       remoteVideoRef.current.volume = 1.0;
       remoteVideoRef.current.muted = false;
       remoteVideoRef.current.play().catch(() => {
-        // If unmuted rejected, keep muted video and rely on remoteAudioRef
         if (remoteVideoRef.current) {
           remoteVideoRef.current.muted = true;
           remoteVideoRef.current.play().catch(() => {});
@@ -455,8 +453,6 @@ export function CallScreen({
 
   // --- 3. ACTIVE CONNECTED CALL SCREEN (Full Ultra-HD Audio & Video) ---
   const showRemoteVideo = isVideoCall && !isPeerVideoOff;
-  const primaryStream = isSwappedView ? localStream : remoteStream;
-  const secondaryStream = isSwappedView ? remoteStream : localStream;
 
   return (
     <div
@@ -477,7 +473,7 @@ export function CallScreen({
             e.stopPropagation();
             unblockAllAudio();
           }}
-          className="absolute top-20 inset-x-4 z-40 mx-auto max-w-md cursor-pointer rounded-2xl border border-amber-500/50 bg-black/90 p-4 shadow-[0_8px_32px_rgba(245,158,11,0.3),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-2xl animate-in fade-in slide-in-from-top-4"
+          className="absolute top-24 inset-x-4 z-40 mx-auto max-w-md cursor-pointer rounded-2xl border border-amber-500/50 bg-black/90 p-4 shadow-[0_8px_32px_rgba(245,158,11,0.3),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-2xl animate-in fade-in slide-in-from-top-4"
         >
           <div className="flex items-center gap-3 text-amber-200">
             <Volume2 className="h-6 w-6 shrink-0 animate-bounce text-amber-400" />
@@ -497,12 +493,12 @@ export function CallScreen({
 
       {/* Top Glassmorphic Liquid HUD (Dynamic Island / Notch protected) */}
       <div
-        style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 16px)' }}
-        className="absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-black/90 via-black/40 to-transparent"
+        style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 20px)' }}
+        className="absolute top-0 inset-x-0 z-30 flex items-center justify-between px-3 sm:px-5 py-3 bg-gradient-to-b from-black/90 via-black/40 to-transparent"
       >
-        {/* Left: Mini Emblem, Peer identity and duration */}
-        <div className="flex items-center gap-3">
-          <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/20 shadow-lg ring-2 ring-blue-500/20 shrink-0">
+        {/* Left: Mini Emblem, Peer identity and duration (No text wrapping on mobile!) */}
+        <div className="flex items-center gap-2.5 min-w-0 flex-1 mr-2">
+          <div className="relative h-10 w-10 sm:h-11 sm:w-11 overflow-hidden rounded-2xl border border-white/20 shadow-lg ring-2 ring-blue-500/20 shrink-0">
             <Image
               src="/logo.png"
               alt="CN-BD Connect"
@@ -512,12 +508,14 @@ export function CallScreen({
               priority
             />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h4 className="font-semibold text-sm leading-tight text-white">{activePeer?.name}</h4>
-              <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-white/15 bg-white/5 text-white/80">
-                {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
-              </Badge>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <h4 className="font-semibold text-sm leading-tight text-white truncate max-w-[110px] sm:max-w-[180px]">
+                {activePeer?.name}
+              </h4>
+              <span className="text-xs shrink-0">
+                {activePeer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
+              </span>
             </div>
             <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-mono mt-0.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -526,8 +524,8 @@ export function CallScreen({
           </div>
         </div>
 
-        {/* Right: Telemetry & Display Controls */}
-        <div className="flex items-center gap-2">
+        {/* Right: Telemetry & Display Controls (Compact on mobile) */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {/* Fit vs Fill Zoom Toggle for Desktop Screen */}
           {isVideoCall && (
             <button
@@ -552,14 +550,14 @@ export function CallScreen({
             </button>
           )}
 
-          {/* Network Stats Chip */}
+          {/* Network Stats Chip (Compact on mobile) */}
           {networkStats && (
             <div
               onClick={(e) => {
                 e.stopPropagation();
                 setShowDetailedStats(!showDetailedStats);
               }}
-              className="flex items-center gap-2 bg-black/60 border border-white/15 rounded-full px-3 py-1 text-xs font-mono backdrop-blur-xl cursor-pointer hover:bg-white/10 transition-colors shadow-lg"
+              className="flex items-center gap-1.5 sm:gap-2 bg-black/60 border border-white/15 rounded-full px-2.5 sm:px-3 py-1 text-xs font-mono backdrop-blur-xl cursor-pointer hover:bg-white/10 transition-colors shadow-lg"
             >
               <span
                 className={`flex items-center gap-1 font-semibold ${
@@ -573,8 +571,8 @@ export function CallScreen({
                 <Activity className="h-3 w-3" />
                 {networkStats.rttMs}ms
               </span>
-              <span className="text-white/20">|</span>
-              <span className="text-white/80">
+              <span className="text-white/20 hidden sm:inline">|</span>
+              <span className="text-white/80 hidden sm:inline">
                 {networkStats.bitrateKbps > 1000
                   ? `${(networkStats.bitrateKbps / 1000).toFixed(1)}M`
                   : `${networkStats.bitrateKbps}k`}
@@ -606,7 +604,7 @@ export function CallScreen({
       {showDetailedStats && networkStats && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute top-20 right-4 z-30 w-72 rounded-2xl border border-white/20 bg-black/85 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-3xl text-xs space-y-2.5 animate-in fade-in zoom-in-95"
+          className="absolute top-24 right-4 z-30 w-72 rounded-2xl border border-white/20 bg-black/85 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-3xl text-xs space-y-2.5 animate-in fade-in zoom-in-95"
         >
           <div className="flex items-center justify-between border-b border-white/10 pb-2">
             <div className="flex items-center gap-1.5 font-semibold text-white">
@@ -656,10 +654,10 @@ export function CallScreen({
         </div>
       )}
 
-      {/* Main Remote View Container */}
+      {/* Main Remote View Container (Strict Vertical Flex Column, perfectly centered) */}
       <div
         onDoubleClick={() => setVideoFitMode((prev) => (prev === 'contain' ? 'cover' : 'contain'))}
-        className="relative flex-1 bg-black flex items-center justify-center overflow-hidden"
+        className="relative flex-1 w-full h-full bg-black flex flex-col items-center justify-center overflow-hidden"
       >
         {/* Desktop-only ambient blurred reflection backdrop */}
         {showRemoteVideo && (
@@ -672,18 +670,18 @@ export function CallScreen({
           />
         )}
 
-        {/* Remote Video Element: bound via setRemoteVideoEl and continuous effect */}
-        <video
-          ref={setRemoteVideoEl}
-          autoPlay
-          playsInline
-          muted={isSpeakerMuted}
-          className={`relative z-10 transition-all duration-300 max-h-screen ${
-            videoFitMode === 'contain'
-              ? 'w-full h-full object-contain'
-              : 'w-full h-full object-cover'
-          } ${showRemoteVideo ? 'opacity-100' : 'opacity-0 absolute pointer-events-none'}`}
-        />
+        {/* Remote Video Element: absolute inset-0 so it NEVER disturbs flex positioning */}
+        {isVideoCall && (
+          <video
+            ref={setRemoteVideoEl}
+            autoPlay
+            playsInline
+            muted={isSpeakerMuted}
+            className={`absolute inset-0 w-full h-full transition-all duration-300 ${
+              videoFitMode === 'contain' ? 'object-contain' : 'object-cover'
+            } ${showRemoteVideo ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none -z-10'}`}
+          />
+        )}
 
         {/* Peer Status Overlay (Muted or Camera Off badge) */}
         <div className="absolute top-24 left-4 z-20 flex flex-col gap-2 pointer-events-none">
@@ -701,30 +699,30 @@ export function CallScreen({
           )}
         </div>
 
-        {/* Audio-only or Camera Off: Grand Emblem Display */}
+        {/* Audio-only or Camera Off: Grand Emblem Display (Guaranteed perfectly centered!) */}
         {(!isVideoCall || isPeerVideoOff || !showRemoteVideo) && (
-          <div className="relative z-10 flex flex-col items-center justify-center gap-5 text-center p-6 animate-in fade-in">
+          <div className="relative z-20 w-full max-w-sm px-4 flex flex-col items-center justify-center gap-4 sm:gap-5 text-center animate-in fade-in">
             {/* High-res Emblem with pulsing ring */}
-            <div className="relative flex h-48 w-48 sm:h-56 sm:w-56 items-center justify-center rounded-3xl overflow-hidden border border-white/20 shadow-2xl ring-8 ring-blue-500/20">
+            <div className="relative flex h-36 w-36 sm:h-48 sm:w-48 items-center justify-center rounded-3xl overflow-hidden border border-white/20 shadow-2xl ring-4 sm:ring-8 ring-blue-500/20 mx-auto">
               <Image
                 src="/logo.png"
                 alt="China Bangladesh Connect Emblem"
-                width={224}
-                height={224}
+                width={192}
+                height={192}
                 className="h-full w-full object-cover"
                 priority
               />
               <div className="absolute inset-0 rounded-3xl border-2 border-emerald-500/40 animate-pulse pointer-events-none" />
             </div>
 
-            <div>
+            <div className="w-full">
               <div className="flex items-center justify-center gap-2">
-                <h2 className="text-2xl font-bold text-white tracking-tight">{activePeer?.name}</h2>
+                <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">{activePeer?.name}</h2>
                 <Badge variant="outline" className="text-xs border-white/15 bg-white/5 text-white/80">
                   {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
                 </Badge>
               </div>
-              <p className="text-xs text-white/50 font-mono mt-1">{activePeer?.email}</p>
+              <p className="text-xs text-white/50 font-mono mt-1 truncate">{activePeer?.email}</p>
               <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Connected via Dedicated Hong Kong Bridge</span>
@@ -733,7 +731,7 @@ export function CallScreen({
           </div>
         )}
 
-        {/* Local Picture-in-Picture Floating Window (Supports Tap to Swap) */}
+        {/* Local Picture-in-Picture Floating Window (Supports Tap to Swap, Video calls only) */}
         {isVideoCall && (
           <div
             onClick={(e) => {
@@ -786,10 +784,10 @@ export function CallScreen({
         )}
       </div>
 
-      {/* Floating Control Dock at Bottom (iOS 26 Liquid Water-Morphism) */}
+      {/* Floating Control Dock at Bottom (iOS 26 Liquid Water-Morphism with Home Bar clearance) */}
       <div
-        style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 16px)' }}
-        className="absolute bottom-3 inset-x-0 z-30 flex items-center justify-center p-3 pointer-events-none"
+        style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 24px)' }}
+        className="absolute bottom-3 sm:bottom-5 inset-x-0 z-30 flex items-center justify-center p-3 pointer-events-none"
       >
         <div
           onClick={(e) => e.stopPropagation()}
