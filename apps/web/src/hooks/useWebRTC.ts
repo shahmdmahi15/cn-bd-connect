@@ -15,7 +15,9 @@ export interface NetworkStats {
   rttMs: number;
   bitrateKbps: number;
   packetLossPercent: number;
-  relayType: string; // 'relay' (Coturn HK) | 'host' | 'srflx'
+  relayType: string; // 'relay' (Coturn HK) | 'direct' | 'srflx'
+  frameRate?: number;
+  resolution?: string;
 }
 
 export function useWebRTC(currentUser: any) {
@@ -33,6 +35,7 @@ export function useWebRTC(currentUser: any) {
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const incomingOfferRef = useRef<any>(null);
   const facingModeRef = useRef<'user' | 'environment'>('user');
@@ -40,7 +43,7 @@ export function useWebRTC(currentUser: any) {
   const prevBytesReceivedRef = useRef<number>(0);
   const prevTimestampRef = useRef<number>(0);
 
-  // Stop ringtones and reset call state
+  // Stop ringtones and reset all call resources
   const resetCall = useCallback(() => {
     ringtone.stop();
     if (statsIntervalRef.current) {
@@ -49,7 +52,15 @@ export function useWebRTC(currentUser: any) {
     }
 
     if (pcRef.current) {
-      pcRef.current.close();
+      try {
+        pcRef.current.ontrack = null;
+        pcRef.current.onicecandidate = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.oniceconnectionstatechange = null;
+        pcRef.current.close();
+      } catch (e) {
+        console.warn('Error closing peer connection:', e);
+      }
       pcRef.current = null;
     }
 
@@ -57,6 +68,11 @@ export function useWebRTC(currentUser: any) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
       setLocalStream(null);
+    }
+
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach((track) => track.stop());
+      remoteStreamRef.current = null;
     }
 
     pendingCandidates.current = [];
@@ -73,7 +89,7 @@ export function useWebRTC(currentUser: any) {
     setNetworkStats(null);
   }, []);
 
-  // Fetch ICE configuration (STUN + Coturn TURNS Hong Kong)
+  // Fetch ICE configuration (Dedicated Hong Kong Coturn STUN/TURN + Cloudflare STUN)
   const fetchIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
     try {
       const token = localStorage.getItem('token');
@@ -82,14 +98,31 @@ export function useWebRTC(currentUser: any) {
       });
       if (res.ok) {
         const data = await res.json().catch(() => null);
-        if (data?.iceServers) return data.iceServers;
+        if (data?.iceServers && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+          console.log('[WebRTC] Loaded ICE servers from Coturn API:', data.iceServers);
+          return data.iceServers;
+        }
       }
     } catch (err) {
-      console.warn('Failed to fetch turn credentials, using default STUN:', err);
+      console.warn('Failed to fetch turn credentials, using default STUN/TURN fallback:', err);
     }
+
     return [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:cn-bd-connect-turn.shahmdmahi.dpdns.org:3478' },
+      {
+        urls: [
+          'stun:cn-bd-connect-turn.shahmdmahi.dpdns.org:3478',
+          'stun:18.166.1.216:3478',
+          'stun:stun.cloudflare.com:3478',
+        ],
+      },
+      {
+        urls: [
+          'turn:cn-bd-connect-turn.shahmdmahi.dpdns.org:3478?transport=udp',
+          'turn:18.166.1.216:3478?transport=udp',
+        ],
+        username: 'cn-bd-guest',
+        credential: 'guest-password',
+      },
     ];
   }, []);
 
@@ -97,7 +130,10 @@ export function useWebRTC(currentUser: any) {
   const getMediaStream = useCallback(
     async (video = true): Promise<MediaStream> => {
       if (localStreamRef.current) {
-        return localStreamRef.current;
+        const hasVideo = localStreamRef.current.getVideoTracks().length > 0;
+        if (!video || hasVideo) {
+          return localStreamRef.current;
+        }
       }
 
       const constraints: MediaStreamConstraints = {
@@ -116,10 +152,27 @@ export function useWebRTC(currentUser: any) {
           : false,
       };
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      localStreamRef.current = stream;
-      setLocalStream(stream);
-      return stream;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        localStreamRef.current = stream;
+        setLocalStream(stream);
+        return stream;
+      } catch (err) {
+        console.warn('Initial getUserMedia failed, retrying with basic constraints:', err);
+        // Fallback to basic audio/video constraints without dimensions
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: video,
+          });
+          localStreamRef.current = fallbackStream;
+          setLocalStream(fallbackStream);
+          return fallbackStream;
+        } catch (fallbackErr) {
+          console.error('getUserMedia failed completely:', fallbackErr);
+          throw fallbackErr;
+        }
+      }
     },
     [],
   );
@@ -134,11 +187,13 @@ export function useWebRTC(currentUser: any) {
       try {
         const stats = await pc.getStats();
         let rtt = 0;
-        let relayType = 'p2p';
+        let relayType = 'direct';
         let bytesReceived = 0;
         let packetsLost = 0;
         let packetsReceived = 0;
         let currentTimestamp = 0;
+        let frameRate = 0;
+        let resolution = '';
 
         stats.forEach((report) => {
           if (
@@ -154,8 +209,13 @@ export function useWebRTC(currentUser: any) {
               localCandidate?.candidateType === 'relay'
             ) {
               relayType = 'relay';
+            } else if (
+              remoteCandidate?.candidateType === 'srflx' ||
+              localCandidate?.candidateType === 'srflx'
+            ) {
+              relayType = 'srflx';
             } else {
-              relayType = localCandidate?.candidateType || 'direct';
+              relayType = 'direct';
             }
           }
 
@@ -164,6 +224,10 @@ export function useWebRTC(currentUser: any) {
             packetsLost += report.packetsLost || 0;
             packetsReceived += report.packetsReceived || 0;
             currentTimestamp = report.timestamp;
+            if (report.framesPerSecond) frameRate = Math.round(report.framesPerSecond);
+            if (report.frameWidth && report.frameHeight) {
+              resolution = `${report.frameWidth}x${report.frameHeight}`;
+            }
           }
         });
 
@@ -188,6 +252,8 @@ export function useWebRTC(currentUser: any) {
           bitrateKbps: Math.max(0, bitrate),
           packetLossPercent: lossPercent,
           relayType,
+          frameRate,
+          resolution,
         });
       } catch (err) {
         console.warn('Error reading WebRTC stats:', err);
@@ -208,21 +274,61 @@ export function useWebRTC(currentUser: any) {
 
       pcRef.current = pc;
 
-      // Handle remote incoming audio/video tracks
+      // Cumulative remote media stream to guarantee both audio & video tracks are bound
+      const accumulatedStream = new MediaStream();
+      remoteStreamRef.current = accumulatedStream;
+
+      // Handle remote incoming audio & video tracks
       pc.ontrack = (event) => {
-        if (event.streams && event.streams[0]) {
-          setRemoteStream(event.streams[0]);
-        }
+        console.log('[WebRTC ontrack] Track received:', event.track.kind, event.track.id);
+
+        const currentStream = remoteStreamRef.current || new MediaStream();
+        remoteStreamRef.current = currentStream;
+
+        // Replace any existing track of same kind
+        const existingTracks = currentStream
+          .getTracks()
+          .filter((t) => t.kind === event.track.kind);
+        existingTracks.forEach((t) => currentStream.removeTrack(t));
+
+        currentStream.addTrack(event.track);
+
+        const updateState = () => {
+          if (remoteStreamRef.current) {
+            // Emitting a fresh MediaStream reference forces React to update and trigger DOM bindings
+            setRemoteStream(new MediaStream(remoteStreamRef.current.getTracks()));
+          }
+        };
+
+        event.track.onunmute = () => {
+          console.log(`[WebRTC track] ${event.track.kind} unmuted and active`);
+          updateState();
+        };
+
+        event.track.onended = () => {
+          console.log(`[WebRTC track] ${event.track.kind} ended`);
+          updateState();
+        };
+
+        updateState();
       };
 
-      // Send discovered ICE candidates to peer
+      // Emit discovered ICE candidates to signaling server
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           const socket = getSocket();
           socket.emit('call:ice_candidate', {
             toUserId: peer.id,
-            candidate: event.candidate,
+            candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
           });
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log(`[WebRTC ICE State] ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === 'failed') {
+          console.warn('[WebRTC] ICE connection failed, restarting ICE...');
+          pc.restartIce();
         }
       };
 
@@ -232,17 +338,14 @@ export function useWebRTC(currentUser: any) {
           setCallState('connected');
           ringtone.stop();
           startStatsMonitoring(pc);
+        } else if (pc.connectionState === 'failed') {
+          console.warn('[WebRTC] Peer connection failed, attempting ICE restart...');
+          pc.restartIce();
         } else if (
           pc.connectionState === 'disconnected' ||
-          pc.connectionState === 'failed' ||
           pc.connectionState === 'closed'
         ) {
-          if (pc.connectionState === 'failed') {
-            console.log('ICE connection failed, triggering ICE restart...');
-            pc.restartIce();
-          } else {
-            resetCall();
-          }
+          resetCall();
         }
       };
 
@@ -269,7 +372,7 @@ export function useWebRTC(currentUser: any) {
         // Create SDP Offer
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
-          offerToReceiveVideo: video,
+          offerToReceiveVideo: true,
         });
 
         await pc.setLocalDescription(offer);
@@ -278,10 +381,18 @@ export function useWebRTC(currentUser: any) {
         socket.emit('call:initiate', {
           toUserId: peer.id,
           isVideo: video,
-          offer,
+          offer: {
+            type: offer.type,
+            sdp: offer.sdp,
+          },
         });
-      } catch (err) {
+      } catch (err: any) {
         console.error('Failed to initiate call:', err);
+        alert(
+          err.name === 'NotAllowedError'
+            ? 'Camera / Microphone permission denied. Please allow access in browser settings.'
+            : 'Failed to start call: ' + (err.message || 'Device error'),
+        );
         resetCall();
       }
     },
@@ -297,31 +408,43 @@ export function useWebRTC(currentUser: any) {
       const stream = await getMediaStream(isVideoCall);
       const pc = await createPeerConnection(activePeer);
 
+      // Add local audio and video tracks
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
+      // Apply incoming remote SDP offer
       await pc.setRemoteDescription(
         new RTCSessionDescription(incomingOfferRef.current),
       );
 
-      // Drain queued ICE candidates
+      // Drain any queued ICE candidates received before answer
       while (pendingCandidates.current.length > 0) {
         const candidate = pendingCandidates.current.shift();
-        if (candidate) await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (candidate && (candidate.candidate || candidate.candidate === '')) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch (candErr) {
+            console.warn('Error applying queued ICE candidate:', candErr);
+          }
+        }
       }
 
-      // Create and send SDP Answer
+      // Create and set SDP Answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
       const socket = getSocket();
       socket.emit('call:accept', {
         toUserId: activePeer.id,
-        answer,
+        answer: {
+          type: answer.type,
+          sdp: answer.sdp,
+        },
       });
 
       setCallState('connected');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to answer call:', err);
+      alert('Could not answer call: ' + (err.message || 'Media error'));
       resetCall();
     }
   }, [activePeer, isVideoCall, getMediaStream, createPeerConnection, resetCall]);
@@ -378,7 +501,11 @@ export function useWebRTC(currentUser: any) {
 
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingModeRef.current },
+        video: {
+          facingMode: facingModeRef.current,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
         audio: false,
       });
 
@@ -390,7 +517,6 @@ export function useWebRTC(currentUser: any) {
       if (sender && newVideoTrack) {
         await sender.replaceTrack(newVideoTrack);
 
-        // Replace track in local stream
         const oldTrack = localStreamRef.current.getVideoTracks()[0];
         if (oldTrack) {
           oldTrack.stop();
@@ -424,12 +550,15 @@ export function useWebRTC(currentUser: any) {
           setIsScreenSharing(true);
 
           screenTrack.onended = async () => {
-            // Restore camera when user stops sharing screen
-            const cameraStream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: facingModeRef.current },
-            });
-            const camTrack = cameraStream.getVideoTracks()[0];
-            await sender.replaceTrack(camTrack);
+            try {
+              const cameraStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: facingModeRef.current },
+              });
+              const camTrack = cameraStream.getVideoTracks()[0];
+              await sender.replaceTrack(camTrack);
+            } catch (err) {
+              console.warn('Could not restore camera track after screen share:', err);
+            }
             setIsScreenSharing(false);
           };
         }
@@ -465,18 +594,27 @@ export function useWebRTC(currentUser: any) {
     }) => {
       ringtone.stop();
       if (pcRef.current) {
-        await pcRef.current.setRemoteDescription(
-          new RTCSessionDescription(data.answer),
-        );
+        try {
+          await pcRef.current.setRemoteDescription(
+            new RTCSessionDescription(data.answer),
+          );
 
-        // Drain any ICE candidates received early
-        while (pendingCandidates.current.length > 0) {
-          const candidate = pendingCandidates.current.shift();
-          if (candidate)
-            await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+          // Drain any ICE candidates received early
+          while (pendingCandidates.current.length > 0) {
+            const candidate = pendingCandidates.current.shift();
+            if (candidate && (candidate.candidate || candidate.candidate === '')) {
+              try {
+                await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                console.warn('Error applying queued candidate on accepted:', e);
+              }
+            }
+          }
+
+          setCallState('connected');
+        } catch (err) {
+          console.error('Failed to set remote description on call accepted:', err);
         }
-
-        setCallState('connected');
       }
     };
 
@@ -496,7 +634,13 @@ export function useWebRTC(currentUser: any) {
       fromUserId: string;
       candidate: any;
     }) => {
-      if (pcRef.current && pcRef.current.remoteDescription) {
+      if (!data.candidate || (!data.candidate.candidate && data.candidate.candidate !== '')) return;
+
+      if (
+        pcRef.current &&
+        pcRef.current.remoteDescription &&
+        pcRef.current.remoteDescription.type
+      ) {
         try {
           await pcRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
         } catch (err) {

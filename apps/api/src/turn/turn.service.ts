@@ -35,40 +35,56 @@ export class TurnService {
     const turnPassword = hmac.digest('base64');
 
     return [
-      // 1. Google Public STUN as fast neutral baseline
+      // 1. Self-hosted Dedicated Hong Kong Coturn STUN (Fastest, zero blocking)
       {
         urls: [
-          'stun:stun.l.google.com:19302',
-          'stun:stun1.l.google.com:19302',
+          `stun:${turnDomain}:3478`,
+          'stun:18.166.1.216:3478',
         ],
       },
-      // 2. Self-hosted Dedicated Hong Kong Coturn STUN
+      // 2. Cloudflare Global Anycast STUN (Reachable across mainland China & Bangladesh)
       {
-        urls: `stun:${turnDomain}:3478`,
+        urls: 'stun:stun.cloudflare.com:3478',
       },
-      // 3. Hong Kong Coturn UDP Relay (Lowest latency when UDP flows smoothly)
+      // 3. Hong Kong Coturn UDP Relay (Lowest latency direct UDP relay via 18.166.1.216)
       {
-        urls: `turn:${turnDomain}:3478?transport=udp`,
+        urls: [
+          `turn:${turnDomain}:3478?transport=udp`,
+          'turn:18.166.1.216:3478?transport=udp',
+        ],
         username: turnUsername,
         credential: turnPassword,
       },
-      // 4. Hong Kong Coturn TCP Relay (When GFW or carrier drops/throttles UDP)
+      // 4. Hong Kong Coturn TCP Relay (Carrier NAT & symmetric firewall traversal)
       {
-        urls: `turn:${turnDomain}:3478?transport=tcp`,
+        urls: [
+          `turn:${turnDomain}:3478?transport=tcp`,
+          'turn:18.166.1.216:3478?transport=tcp',
+        ],
         username: turnUsername,
         credential: turnPassword,
       },
       // 5. Hong Kong Coturn TURNS over TLS on 5349 (Encrypted media relay)
       {
-        urls: `turns:${turnDomain}:5349?transport=tcp`,
+        urls: [
+          `turns:${turnDomain}:5349?transport=tcp`,
+          'turns:18.166.1.216:5349?transport=tcp',
+        ],
         username: turnUsername,
         credential: turnPassword,
       },
-      // 6. Hong Kong Coturn TURNS over TLS on port 443 (Ultimate GFW bypass)
+      // 6. Hong Kong Coturn TURNS over TLS on Port 443 (Ultimate GFW bypass via Nginx SNI)
       {
         urls: `turns:${turnDomain}:443?transport=tcp`,
         username: turnUsername,
         credential: turnPassword,
+      },
+      // 7. Neutral Google STUN fallback for non-mainland peers
+      {
+        urls: [
+          'stun:stun.l.google.com:19302',
+          'stun:stun1.l.google.com:19302',
+        ],
       },
     ];
   }
