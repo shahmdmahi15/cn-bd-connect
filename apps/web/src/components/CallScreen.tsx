@@ -640,6 +640,22 @@ export function CallScreen({
                   ? `${(networkStats.bitrateKbps / 1000).toFixed(1)}M`
                   : `${networkStats.bitrateKbps}k`}
               </span>
+              {networkStats.adaptiveQuality && (
+                <span
+                  className={`text-[9px] px-1.5 py-0.5 rounded-full font-sans font-bold flex items-center gap-1 ${
+                    networkStats.qualityTier === 'excellent'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : networkStats.qualityTier === 'good'
+                        ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                        : networkStats.qualityTier === 'fair'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                          : 'bg-red-500/20 text-red-300 border border-red-500/30'
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+                  {networkStats.adaptiveQuality.replace('Auto ', '')}
+                </span>
+              )}
               <Badge
                 variant="outline"
                 className="text-[9px] py-0 px-1 border-white/15 bg-white/5 text-blue-400 ml-0.5"
@@ -697,6 +713,22 @@ export function CallScreen({
             </button>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[11px]">
+            {networkStats.adaptiveQuality && (
+              <div className="bg-white/5 p-2 rounded-xl border border-white/5 col-span-2 flex items-center justify-between">
+                <div>
+                  <span className="text-white/40 block text-[10px]">Adaptive Video Quality</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    {networkStats.adaptiveQuality}
+                  </span>
+                </div>
+                <Badge
+                  variant="outline"
+                  className="text-[9px] bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                >
+                  Dynamic ABR
+                </Badge>
+              </div>
+            )}
             <div className="bg-white/5 p-2 rounded-xl border border-white/5">
               <span className="text-white/40 block text-[10px]">Round-Trip Time</span>
               <span className="font-mono font-bold text-emerald-400">{networkStats.rttMs} ms</span>
@@ -731,6 +763,12 @@ export function CallScreen({
               <div className="bg-white/5 p-2 rounded-xl border border-white/5">
                 <span className="text-white/40 block text-[10px]">Frame Rate</span>
                 <span className="font-mono font-bold text-emerald-400">{networkStats.frameRate} fps</span>
+              </div>
+            )}
+            {networkStats.jitterMs !== undefined && (
+              <div className="bg-white/5 p-2 rounded-xl border border-white/5 col-span-2 flex items-center justify-between">
+                <span className="text-white/40 text-[10px]">Network Jitter</span>
+                <span className="font-mono font-bold text-white/80">{networkStats.jitterMs} ms</span>
               </div>
             )}
           </div>

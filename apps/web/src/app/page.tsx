@@ -134,12 +134,30 @@ export default function App() {
   // Settings State
   const [ringtoneVolume, setRingtoneVolume] = useState<number>(0.8);
   const [isTestingRingtone, setIsTestingRingtone] = useState<boolean>(false);
-  const [videoQuality, setVideoQuality] = useState<'1080p' | '720p' | '480p'>('1080p');
+  const [videoQuality, setVideoQuality] = useState<'auto' | '1080p' | '720p' | '480p'>('auto');
   const [noiseSuppression, setNoiseSuppression] = useState<boolean>(true);
   const [echoCancellation, setEchoCancellation] = useState<boolean>(true);
 
-  // WebRTC Hook
-  const webrtc = useWebRTC(currentUser);
+  // WebRTC Hook with Dynamic Quality Preference
+  const webrtc = useWebRTC(currentUser, { qualityPreference: videoQuality });
+
+  // Load saved settings from localStorage
+  useEffect(() => {
+    const savedQuality = localStorage.getItem('videoQuality') as
+      | 'auto'
+      | '1080p'
+      | '720p'
+      | '480p'
+      | null;
+    if (savedQuality) {
+      setVideoQuality(savedQuality);
+    }
+  }, []);
+
+  const handleSetVideoQuality = (quality: 'auto' | '1080p' | '720p' | '480p') => {
+    setVideoQuality(quality);
+    localStorage.setItem('videoQuality', quality);
+  };
 
   // 1. Initial Auth Check
   useEffect(() => {
@@ -696,7 +714,13 @@ export default function App() {
   // --- AUTH SCREEN (OLED Black + iOS 26 Liquid Water-Morphism) ---
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 relative overflow-hidden selection:bg-blue-600 selection:text-white">
+      <div
+        style={{
+          paddingTop: 'max(env(safe-area-inset-top, 0px), 16px)',
+          paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 16px)',
+        }}
+        className="min-h-screen bg-black flex flex-col items-center justify-center p-4 relative overflow-hidden selection:bg-blue-600 selection:text-white"
+      >
         <div className="absolute top-1/4 -left-20 h-96 w-96 rounded-full bg-blue-600/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-1/4 -right-20 h-96 w-96 rounded-full bg-emerald-600/15 blur-3xl pointer-events-none" />
 
@@ -878,21 +902,28 @@ export default function App() {
         </div>
       )}
 
-      {/* Header: Brand & Live Latency Indicator */}
-      <header className="sticky top-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-2xl">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="relative h-10 w-10 rounded-xl overflow-hidden border border-white/20 shadow-md">
+      {/* Header: Brand & Live Latency Indicator (Safe-area protected against notch and status bar) */}
+      <header
+        style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 12px)' }}
+        className="sticky top-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-2xl"
+      >
+        <div className="max-w-6xl mx-auto px-4 py-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="relative h-9 w-9 sm:h-10 sm:w-10 rounded-xl overflow-hidden border border-white/20 shadow-md shrink-0">
               <Image src="/logo.png" alt="Logo" fill className="object-cover" priority />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold tracking-tight text-white text-base">CN-BD Connect</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold tracking-tight text-white text-sm sm:text-base whitespace-nowrap">
+                  CN-BD Connect
+                </span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono shrink-0">
                   v2.6
                 </span>
               </div>
-              <p className="text-[11px] text-white/50">Dedicated Telecommunication Hub</p>
+              <p className="text-[10px] sm:text-[11px] text-white/50 truncate max-w-[130px] sm:max-w-none">
+                Dedicated Telecommunication Hub
+              </p>
             </div>
           </div>
 
@@ -950,7 +981,7 @@ export default function App() {
           </div>
 
           {/* User Status Card & Live Latency */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-xl bg-white/5 border border-white/10 font-mono text-xs">
               <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-white/60">HK Hub:</span>
@@ -961,14 +992,14 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab('profile')}
-              className="flex items-center gap-2 px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs transition-colors"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs transition-colors max-w-[120px] sm:max-w-[180px]"
             >
-              <span className="font-semibold text-white">{currentUser.name}</span>
-              <span className="text-sm">{currentUser.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
+              <span className="font-semibold text-white truncate">{currentUser.name}</span>
+              <span className="text-sm shrink-0">{currentUser.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
             </button>
             <button
               onClick={handleLogout}
-              className="h-8 w-8 rounded-xl bg-white/5 hover:bg-red-500/20 text-white/70 hover:text-red-400 border border-white/10 flex items-center justify-center transition-colors"
+              className="h-8 w-8 rounded-xl bg-white/5 hover:bg-red-500/20 text-white/70 hover:text-red-400 border border-white/10 flex items-center justify-center transition-colors shrink-0"
               title="Sign Out"
             >
               <LogOut className="h-3.5 w-3.5" />
@@ -977,8 +1008,11 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content Container */}
-      <main className="max-w-6xl mx-auto px-4 py-6 flex-1 w-full space-y-6">
+      {/* Main Content Container (Padded for mobile bottom dock clearance) */}
+      <main
+        style={{ paddingBottom: 'calc(max(env(safe-area-inset-bottom, 0px), 16px) + 84px)' }}
+        className="max-w-6xl mx-auto px-4 py-6 flex-1 w-full space-y-6"
+      >
         {/* --- TAB 1: FRIENDS & CALLING --- */}
         {activeTab === 'friends' && (
           <div className="space-y-6">
@@ -1421,47 +1455,73 @@ export default function App() {
             <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
               <div className="flex items-center gap-2 mb-4">
                 <SlidersHorizontal className="h-4 w-4 text-blue-400" />
-                <h3 className="text-sm font-bold text-white">Video Quality & Codec Tuning</h3>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Video Quality & Dynamic Adaptation</h3>
+                  <p className="text-[11px] text-white/50">Auto-adjusts bitrate and resolution to your internet connection</p>
+                </div>
               </div>
 
               <div className="space-y-4">
                 <div>
-                  <label className="text-xs text-white/70 block mb-2">Resolution & Frame Rate</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <label className="text-xs text-white/70 block mb-2">Quality Mode</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <button
                       type="button"
-                      onClick={() => setVideoQuality('1080p')}
-                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                      onClick={() => handleSetVideoQuality('auto')}
+                      className={`h-12 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center transition-all ${
+                        videoQuality === 'auto'
+                          ? 'border-emerald-500 bg-emerald-600/30 text-white shadow-lg ring-1 ring-emerald-500/50'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
+                      }`}
+                    >
+                      <span className="font-bold flex items-center gap-1">
+                        <Sparkles className="h-3 w-3 text-emerald-400" />
+                        Auto Adaptive
+                      </span>
+                      <span className="text-[9px] text-emerald-300/80">Recommended</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSetVideoQuality('1080p')}
+                      className={`h-12 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center transition-all ${
                         videoQuality === '1080p'
-                          ? 'border-blue-500 bg-blue-600 text-white'
-                          : 'border-white/10 bg-white/5 text-white/60'
+                          ? 'border-blue-500 bg-blue-600/30 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
                       }`}
                     >
-                      1080p (60fps)
+                      <span className="font-bold">1080p Full HD</span>
+                      <span className="text-[9px] text-white/50">Up to 30fps</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => setVideoQuality('720p')}
-                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                      onClick={() => handleSetVideoQuality('720p')}
+                      className={`h-12 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center transition-all ${
                         videoQuality === '720p'
-                          ? 'border-blue-500 bg-blue-600 text-white'
-                          : 'border-white/10 bg-white/5 text-white/60'
+                          ? 'border-blue-500 bg-blue-600/30 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
                       }`}
                     >
-                      720p (30fps)
+                      <span className="font-bold">720p HD</span>
+                      <span className="text-[9px] text-white/50">Balanced</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => setVideoQuality('480p')}
-                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                      onClick={() => handleSetVideoQuality('480p')}
+                      className={`h-12 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center transition-all ${
                         videoQuality === '480p'
-                          ? 'border-blue-500 bg-blue-600 text-white'
-                          : 'border-white/10 bg-white/5 text-white/60'
+                          ? 'border-blue-500 bg-blue-600/30 text-white shadow-lg ring-1 ring-blue-500/50'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
                       }`}
                     >
-                      480p (Data Saver)
+                      <span className="font-bold">480p SD</span>
+                      <span className="text-[9px] text-white/50">Data Saver</span>
                     </button>
                   </div>
+                  <p className="text-[11px] text-white/50 mt-2">
+                    {videoQuality === 'auto'
+                      ? '⚡ Auto Mode monitors network latency, jitter, and packet loss in real time to automatically adjust video quality without stuttering or dropped calls (just like WhatsApp & Zoom).'
+                      : 'Limits video resolution ceiling while still automatically throttling down if connection encounters packet loss.'}
+                  </p>
                 </div>
 
                 <div className="flex items-center justify-between pt-2 border-t border-white/10">
@@ -1656,8 +1716,11 @@ export default function App() {
         )}
       </main>
 
-      {/* Mobile-First Bottom Floating Dock (Native PWA Experience) */}
-      <nav className="md:hidden fixed bottom-3 left-4 right-4 z-40 h-16 rounded-3xl bg-black/80 border border-white/20 shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl flex items-center justify-around px-2">
+      {/* Mobile-First Bottom Floating Dock (Native PWA Experience with Safe-Area clearance) */}
+      <nav
+        style={{ bottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}
+        className="md:hidden fixed left-4 right-4 z-40 h-16 rounded-3xl bg-black/80 border border-white/20 shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl flex items-center justify-around px-2"
+      >
         <button
           onClick={() => setActiveTab('friends')}
           className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${

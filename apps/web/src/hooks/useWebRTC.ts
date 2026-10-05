@@ -17,19 +17,77 @@ export interface NetworkStats {
   relayType: string;
   frameRate?: number;
   resolution?: string;
+  jitterMs?: number;
+  adaptiveQuality?: string;
+  qualityTier?: 'excellent' | 'good' | 'fair' | 'poor' | 'critical';
 }
+
+export interface WebRTCOptions {
+  qualityPreference?: 'auto' | '1080p' | '720p' | '480p';
+}
+
+export interface QualityTierConfig {
+  name: string;
+  qualityTier: 'excellent' | 'good' | 'fair' | 'poor' | 'critical';
+  maxBitrate: number;
+  scaleResolutionDownBy: number;
+  maxFramerate: number;
+}
+
+export const QUALITY_TIERS: QualityTierConfig[] = [
+  // Tier 0: Critical (Audio Priority, severe loss/congestion)
+  {
+    name: 'Auto (Audio Priority)',
+    qualityTier: 'critical',
+    maxBitrate: 180000,
+    scaleResolutionDownBy: 3.5,
+    maxFramerate: 15,
+  },
+  // Tier 1: Poor (360p Data Saver)
+  {
+    name: 'Auto (360p SD)',
+    qualityTier: 'poor',
+    maxBitrate: 380000,
+    scaleResolutionDownBy: 2.2,
+    maxFramerate: 20,
+  },
+  // Tier 2: Fair (480p Standard)
+  {
+    name: 'Auto (480p SD)',
+    qualityTier: 'fair',
+    maxBitrate: 850000,
+    scaleResolutionDownBy: 1.6,
+    maxFramerate: 24,
+  },
+  // Tier 3: Good (720p HD)
+  {
+    name: 'Auto (720p HD)',
+    qualityTier: 'good',
+    maxBitrate: 1800000,
+    scaleResolutionDownBy: 1.0,
+    maxFramerate: 30,
+  },
+  // Tier 4: Excellent (1080p Full HD)
+  {
+    name: 'Auto (1080p Full HD)',
+    qualityTier: 'excellent',
+    maxBitrate: 3200000,
+    scaleResolutionDownBy: 1.0,
+    maxFramerate: 30,
+  },
+];
 
 import { ringtoneService } from '@/lib/ringtone';
 const ringtone = ringtoneService;
 
-// Studio-grade Opus audio + Ultra-high bitrate 4.5Mbps 1080p video with H.264 prioritization
+// Studio-grade Opus audio + Dynamic Adaptive Bitrate video with H.264 prioritization
 function enhanceSdp(sdp: string): string {
-  // 1. Boost Opus audio parameters: 128kbps, stereo, in-band FEC for packet loss resilience, no DTX clipping
+  // 1. Opus voice engine with in-band FEC, VBR, and dynamic packet loss handling
   let enhanced = sdp.replace(
     /(a=fmtp:\d+ .*)/g,
     (match) => {
       if (match.includes('opus')) {
-        return `${match};minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1;dtx=0`;
+        return `${match};minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=64000;cbr=0;dtx=1`;
       }
       return match;
     },
@@ -40,7 +98,7 @@ function enhanceSdp(sdp: string): string {
   const match = enhanced.match(opusRtpMapRegex);
   if (match) {
     const pt = match[1];
-    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1;dtx=0`;
+    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=64000;cbr=0;dtx=1`;
     if (!enhanced.includes(`a=fmtp:${pt}`)) {
       enhanced = enhanced.replace(
         opusRtpMapRegex,
@@ -49,9 +107,9 @@ function enhanceSdp(sdp: string): string {
     }
   }
 
-  // 2. Set maximum video bitrate ceiling in SDP (4.5 Mbps for pristine 1080p60)
+  // 2. Set maximum video bitrate ceiling in SDP (3.5 Mbps for smooth HD with automatic congestion control)
   enhanced = enhanced.replace(/(m=video [^\r\n]+)/, (mLine) => {
-    return `${mLine}\r\nb=AS:4500\r\nb=TIAS:4500000`;
+    return `${mLine}\r\nb=AS:3500\r\nb=TIAS:3500000`;
   });
 
   // 3. Reorder video codecs in SDP so H.264 payload types are prioritized for hardware acceleration
@@ -107,7 +165,10 @@ function preferH264Codecs(pc: RTCPeerConnection) {
   }
 }
 
-export function useWebRTC(currentUser: { id: string; name: string } | null) {
+export function useWebRTC(
+  currentUser: { id: string; name: string } | null,
+  options?: WebRTCOptions,
+) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [callState, setCallState] = useState<
@@ -132,6 +193,61 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
   const prevBytesReceivedRef = useRef<number>(0);
   const prevTimestampRef = useRef<number>(0);
   const facingModeRef = useRef<'user' | 'environment'>('user');
+
+  const qualityPreference = options?.qualityPreference || 'auto';
+  const qualityPreferenceRef = useRef(qualityPreference);
+  qualityPreferenceRef.current = qualityPreference;
+
+  const initialTier =
+    qualityPreference === '480p' ? 2 :
+    qualityPreference === '720p' ? 3 :
+    qualityPreference === '1080p' ? 4 : 3;
+
+  const activeTierRef = useRef<number>(initialTier);
+  const stableCyclesRef = useRef<number>(0);
+
+  // Helper to dynamically adapt video encoding parameters via RTCRtpSender.setParameters
+  const applyQualityTier = useCallback(async (pc: RTCPeerConnection, tierIndex: number) => {
+    try {
+      const tier = QUALITY_TIERS[tierIndex];
+      if (!tier) return;
+
+      const senders = pc.getSenders();
+      for (const sender of senders) {
+        if (!sender.track || sender.track.kind !== 'video') continue;
+
+        try {
+          if ('degradationPreference' in sender) {
+            (sender as any).degradationPreference = 'balanced';
+          }
+        } catch {}
+
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+
+        const enc = params.encodings[0];
+        const isChanged =
+          enc.maxBitrate !== tier.maxBitrate ||
+          enc.scaleResolutionDownBy !== tier.scaleResolutionDownBy ||
+          enc.maxFramerate !== tier.maxFramerate;
+
+        if (isChanged) {
+          enc.maxBitrate = tier.maxBitrate;
+          enc.scaleResolutionDownBy = tier.scaleResolutionDownBy;
+          enc.maxFramerate = tier.maxFramerate;
+          enc.networkPriority = 'high';
+          await sender.setParameters(params).catch(() => {});
+          console.log(
+            `[WebRTC Dynamic ABR] Adjusted video to ${tier.name} (Bitrate: ${tier.maxBitrate / 1000}kbps, Scale: ${tier.scaleResolutionDownBy}, FPS: ${tier.maxFramerate})`,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('[WebRTC Dynamic ABR notice]:', err);
+    }
+  }, []);
 
   // Fetch optimal ICE configuration (Self-Hosted Coturn + Cloudflare Anycast fallback)
   const fetchIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
@@ -194,7 +310,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     }
   }, []);
 
-  // Acquire local camera and microphone stream with studio quality (1080p60 -> 720p30 -> Basic fallback cascade)
+  // Acquire local camera and microphone stream with studio quality (1080p30 -> 720p30 -> Basic fallback cascade)
   const getMediaStream = useCallback(
     async (video = true): Promise<MediaStream> => {
       if (localStreamRef.current) {
@@ -212,7 +328,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
         sampleRate: 48000,
       };
 
-      // Cascade Tier 1: Pristine Full HD 1080p @ 60fps
+      // Cascade Tier 1: 1080p Full HD @ 30fps (Standard communication rate)
       if (video) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
@@ -221,14 +337,14 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
               facingMode: facingModeRef.current,
               width: { ideal: 1920, min: 1280 },
               height: { ideal: 1080, min: 720 },
-              frameRate: { ideal: 60, min: 24, max: 60 },
+              frameRate: { ideal: 30, max: 30 },
             },
           });
           localStreamRef.current = stream;
           setLocalStream(stream);
           return stream;
         } catch (tier1Err) {
-          console.warn('[WebRTC] 1080p60 unavailable, cascading to 720p HD:', tier1Err);
+          console.warn('[WebRTC] 1080p unavailable, cascading to 720p HD:', tier1Err);
         }
 
         // Cascade Tier 2: 720p HD @ 30fps
@@ -239,7 +355,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
               facingMode: facingModeRef.current,
               width: { ideal: 1280 },
               height: { ideal: 720 },
-              frameRate: { ideal: 30 },
+              frameRate: { ideal: 30, max: 30 },
             },
           });
           localStreamRef.current = stream;
@@ -253,7 +369,10 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: audioConfig,
-            video: { facingMode: facingModeRef.current },
+            video: {
+              facingMode: facingModeRef.current,
+              frameRate: { ideal: 30, max: 30 },
+            },
           });
           localStreamRef.current = stream;
           setLocalStream(stream);
@@ -280,115 +399,178 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     [],
   );
 
-  // Apply maximum bitrates on senders for ultra-crisp video and studio audio
-  const tuneSenderParameters = useCallback(async (pc: RTCPeerConnection) => {
-    try {
-      const senders = pc.getSenders();
-      for (const sender of senders) {
-        if (!sender.track) continue;
-        const params = sender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          params.encodings = [{}];
-        }
-        if (sender.track.kind === 'video') {
-          params.encodings[0].maxBitrate = 4500000; // 4.5 Mbps top-notch 1080p
-          params.encodings[0].maxFramerate = 60;
-          params.encodings[0].scaleResolutionDownBy = 1.0;
-          params.encodings[0].networkPriority = 'high';
-        } else if (sender.track.kind === 'audio') {
-          params.encodings[0].maxBitrate = 128000; // 128 kbps CD audio
-          params.encodings[0].networkPriority = 'high';
-        }
-        await sender.setParameters(params).catch(() => {});
-      }
-    } catch (err) {
-      console.warn('Tune sender parameters notice:', err);
-    }
-  }, []);
-
-  // Setup live connection statistics polling
-  const startStatsMonitoring = useCallback((pc: RTCPeerConnection) => {
-    if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
-
-    statsIntervalRef.current = setInterval(async () => {
-      if (!pc || pc.connectionState !== 'connected') return;
-
+  // Apply initial transmission parameters and dynamic degradation preference
+  const tuneSenderParameters = useCallback(
+    async (pc: RTCPeerConnection) => {
       try {
-        const stats = await pc.getStats();
-        let rtt = 0;
-        let relayType = 'direct';
-        let bytesReceived = 0;
-        let packetsLost = 0;
-        let packetsReceived = 0;
-        let currentTimestamp = 0;
-        let frameRate = 0;
-        let resolution = '';
+        const senders = pc.getSenders();
+        for (const sender of senders) {
+          if (!sender.track) continue;
 
-        stats.forEach((report) => {
-          if (
-            report.type === 'candidate-pair' &&
-            report.state === 'succeeded' &&
-            report.nominated
-          ) {
-            rtt = Math.round((report.currentRoundTripTime || 0) * 1000);
-            const remoteCandidate = stats.get(report.remoteCandidateId);
-            const localCandidate = stats.get(report.localCandidateId);
-            if (
-              remoteCandidate?.candidateType === 'relay' ||
-              localCandidate?.candidateType === 'relay'
-            ) {
-              relayType = 'relay';
-            } else if (
-              remoteCandidate?.candidateType === 'srflx' ||
-              localCandidate?.candidateType === 'srflx'
-            ) {
-              relayType = 'srflx';
-            } else {
-              relayType = 'direct';
+          try {
+            if ('degradationPreference' in sender) {
+              (sender as any).degradationPreference = 'balanced';
             }
-          }
+          } catch {}
 
-          if (report.type === 'inbound-rtp' && report.kind === 'video') {
-            bytesReceived += report.bytesReceived || 0;
-            packetsLost += report.packetsLost || 0;
-            packetsReceived += report.packetsReceived || 0;
-            currentTimestamp = report.timestamp;
-            if (report.framesPerSecond) frameRate = Math.round(report.framesPerSecond);
-            if (report.frameWidth && report.frameHeight) {
-              resolution = `${report.frameWidth}x${report.frameHeight}`;
+          if (sender.track.kind === 'audio') {
+            const params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) {
+              params.encodings = [{}];
             }
+            params.encodings[0].maxBitrate = 64000; // 64 kbps adaptive Opus
+            params.encodings[0].networkPriority = 'high';
+            await sender.setParameters(params).catch(() => {});
           }
-        });
-
-        let bitrate = 0;
-        if (prevTimestampRef.current && currentTimestamp > prevTimestampRef.current) {
-          const deltaBytes = bytesReceived - prevBytesReceivedRef.current;
-          const deltaTime = (currentTimestamp - prevTimestampRef.current) / 1000;
-          bitrate = Math.round((deltaBytes * 8) / (deltaTime * 1000));
         }
 
-        prevBytesReceivedRef.current = bytesReceived;
-        prevTimestampRef.current = currentTimestamp;
-
-        const totalPackets = packetsLost + packetsReceived;
-        const lossPercent =
-          totalPackets > 0
-            ? Math.round((packetsLost / totalPackets) * 1000) / 10
-            : 0;
-
-        setNetworkStats({
-          rttMs: rtt,
-          bitrateKbps: Math.max(0, bitrate),
-          packetLossPercent: lossPercent,
-          relayType,
-          frameRate,
-          resolution,
-        });
+        // Apply initial active video quality tier
+        await applyQualityTier(pc, activeTierRef.current);
       } catch (err) {
-        console.warn('Error reading WebRTC stats:', err);
+        console.warn('Tune sender parameters notice:', err);
       }
-    }, 1500);
-  }, []);
+    },
+    [applyQualityTier],
+  );
+
+  // Setup live connection statistics polling & dynamic ABR engine
+  const startStatsMonitoring = useCallback(
+    (pc: RTCPeerConnection) => {
+      if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+
+      statsIntervalRef.current = setInterval(async () => {
+        if (!pc || pc.connectionState !== 'connected') return;
+
+        try {
+          const stats = await pc.getStats();
+          let rtt = 0;
+          let relayType = 'direct';
+          let bytesReceived = 0;
+          let packetsLost = 0;
+          let packetsReceived = 0;
+          let currentTimestamp = 0;
+          let frameRate = 0;
+          let resolution = '';
+          let jitterMs: number | undefined = undefined;
+
+          stats.forEach((report) => {
+            if (
+              report.type === 'candidate-pair' &&
+              report.state === 'succeeded' &&
+              report.nominated
+            ) {
+              rtt = Math.round((report.currentRoundTripTime || 0) * 1000);
+              const remoteCandidate = stats.get(report.remoteCandidateId);
+              const localCandidate = stats.get(report.localCandidateId);
+              if (
+                remoteCandidate?.candidateType === 'relay' ||
+                localCandidate?.candidateType === 'relay'
+              ) {
+                relayType = 'relay';
+              } else if (
+                remoteCandidate?.candidateType === 'srflx' ||
+                localCandidate?.candidateType === 'srflx'
+              ) {
+                relayType = 'srflx';
+              } else {
+                relayType = 'direct';
+              }
+            }
+
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              bytesReceived += report.bytesReceived || 0;
+              packetsLost += report.packetsLost || 0;
+              packetsReceived += report.packetsReceived || 0;
+              currentTimestamp = report.timestamp;
+              if (report.framesPerSecond) frameRate = Math.round(report.framesPerSecond);
+              if (report.frameWidth && report.frameHeight) {
+                resolution = `${report.frameWidth}x${report.frameHeight}`;
+              }
+              if (typeof report.jitter === 'number') {
+                jitterMs = Math.round(report.jitter * 1000);
+              }
+            }
+          });
+
+          let bitrate = 0;
+          if (prevTimestampRef.current && currentTimestamp > prevTimestampRef.current) {
+            const deltaBytes = bytesReceived - prevBytesReceivedRef.current;
+            const deltaTime = (currentTimestamp - prevTimestampRef.current) / 1000;
+            bitrate = Math.round((deltaBytes * 8) / (deltaTime * 1000));
+          }
+
+          prevBytesReceivedRef.current = bytesReceived;
+          prevTimestampRef.current = currentTimestamp;
+
+          const totalPackets = packetsLost + packetsReceived;
+          const lossPercent =
+            totalPackets > 0
+              ? Math.round((packetsLost / totalPackets) * 1000) / 10
+              : 0;
+
+          // --- AUTOMATIC ADAPTIVE QUALITY ENGINE (Dynamic ABR) ---
+          // Evaluates network health (loss, RTT, jitter) just like WhatsApp, Zoom & FaceTime
+          let recommendedTier = 4;
+          const effectiveJitter = jitterMs || 0;
+          if (lossPercent >= 12 || rtt >= 550 || effectiveJitter >= 120) {
+            recommendedTier = 0; // Critical: Audio priority, video ultra-low
+          } else if (lossPercent >= 6 || rtt >= 380 || effectiveJitter >= 75) {
+            recommendedTier = 1; // Poor: 360p Data Saver
+          } else if (lossPercent >= 2.5 || rtt >= 240 || effectiveJitter >= 45) {
+            recommendedTier = 2; // Fair: 480p SD
+          } else if (lossPercent >= 1.0 || rtt >= 135) {
+            recommendedTier = 3; // Good: 720p HD
+          } else {
+            recommendedTier = 4; // Excellent: 1080p Full HD
+          }
+
+          // Apply user ceiling preference
+          const pref = qualityPreferenceRef.current;
+          const maxAllowedTier =
+            pref === '480p' ? 2 :
+            pref === '720p' ? 3 :
+            pref === '1080p' ? 4 : 4;
+
+          const targetTier = Math.min(recommendedTier, maxAllowedTier);
+
+          // Adaptation logic: Fast step-down on degradation, cautious step-up on recovery
+          if (targetTier < activeTierRef.current) {
+            // Rapid downgrade to prevent packet queues and frozen video
+            activeTierRef.current = targetTier;
+            stableCyclesRef.current = 0;
+            await applyQualityTier(pc, targetTier);
+          } else if (targetTier > activeTierRef.current) {
+            // Conservative upgrade: require network to stay stable for 3 consecutive intervals (~4.5s)
+            stableCyclesRef.current += 1;
+            if (stableCyclesRef.current >= 3) {
+              activeTierRef.current = activeTierRef.current + 1;
+              stableCyclesRef.current = 0;
+              await applyQualityTier(pc, activeTierRef.current);
+            }
+          } else {
+            stableCyclesRef.current = 0;
+          }
+
+          const currentTierConfig = QUALITY_TIERS[activeTierRef.current] || QUALITY_TIERS[3];
+
+          setNetworkStats({
+            rttMs: rtt,
+            bitrateKbps: Math.max(0, bitrate),
+            packetLossPercent: lossPercent,
+            relayType,
+            frameRate,
+            resolution,
+            jitterMs,
+            adaptiveQuality: currentTierConfig.name,
+            qualityTier: currentTierConfig.qualityTier,
+          });
+        } catch (err) {
+          console.warn('Error reading WebRTC stats:', err);
+        }
+      }, 1500);
+    },
+    [applyQualityTier],
+  );
 
   // Broadcast control message to peer via DataChannel & WebSocket signaling fallback
   const sendControlMessage = useCallback(
@@ -462,7 +644,9 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     setIsPeerVideoOff(false);
     setIsScreenSharing(false);
     setNetworkStats(null);
-  }, [releaseWakeLock]);
+    activeTierRef.current = initialTier;
+    stableCyclesRef.current = 0;
+  }, [releaseWakeLock, initialTier]);
 
   // Initialize RTCPeerConnection with optimal ICE parameters and DataChannel
   const createPeerConnection = useCallback(
@@ -807,7 +991,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
             facingMode: facingModeRef.current,
             width: { ideal: 1920 },
             height: { ideal: 1080 },
-            frameRate: { ideal: 60 },
+            frameRate: { ideal: 30, max: 30 },
           },
           audio: false,
         });
