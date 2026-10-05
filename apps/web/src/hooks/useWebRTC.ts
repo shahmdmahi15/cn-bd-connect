@@ -89,7 +89,7 @@ export function useWebRTC(currentUser: any) {
     }
     return [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:cn-bd-connect-turn.dpdns.org:3478' },
+      { urls: 'stun:cn-bd-connect-turn.shahmdmahi.dpdns.org:3478' },
     ];
   }, []);
 

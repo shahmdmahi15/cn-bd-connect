@@ -15,7 +15,7 @@ export class TurnService {
   getIceServers(userId: string): IceServerConfig[] {
     const turnDomain = this.configService.get<string>(
       'COTURN_DOMAIN',
-      'cn-bd-connect-turn.dpdns.org',
+      'cn-bd-connect-turn.shahmdmahi.dpdns.org',
     );
     const authSecret = this.configService.get<string>(
       'COTURN_AUTH_SECRET',
