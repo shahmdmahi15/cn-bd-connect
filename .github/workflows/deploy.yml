@@ -93,7 +93,7 @@ jobs:
             docker compose up -d
 
             echo "==> Running PostgreSQL database migrations via Prisma..."
-            docker compose exec -T api pnpm prisma db push --skip-generate
+            docker compose exec -T api npx prisma db push --skip-generate
 
             echo "==> Cleaning unused Docker dangling images to preserve SSD space..."
             docker image prune -f
