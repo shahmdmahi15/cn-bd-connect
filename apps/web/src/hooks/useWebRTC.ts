@@ -81,8 +81,8 @@ export function useWebRTC(currentUser: any) {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        const data = await res.json();
-        return data.iceServers;
+        const data = await res.json().catch(() => null);
+        if (data?.iceServers) return data.iceServers;
       }
     } catch (err) {
       console.warn('Failed to fetch turn credentials, using default STUN:', err);

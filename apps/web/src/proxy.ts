@@ -13,12 +13,44 @@ export async function proxyRequest(req: NextRequest, path: string): Promise<Next
   const url = new URL(req.url);
   const targetUrl = `${BACKEND_URL.replace(/\/$/, '')}/api/${path.replace(/^\//, '')}${url.search}`;
 
-  const headers = new Headers(req.headers);
+  // Sanitize headers: exclude hop-by-hop headers to prevent Undici InvalidArgumentError
+  const headers = new Headers();
+  req.headers.forEach((value, key) => {
+    const lowerKey = key.toLowerCase();
+    if (
+      ![
+        'connection',
+        'upgrade',
+        'host',
+        'content-length',
+        'keep-alive',
+        'transfer-encoding',
+        'te',
+        'trailer',
+        'proxy-authorization',
+        'proxy-authenticate',
+        'expect',
+      ].includes(lowerKey)
+    ) {
+      headers.set(key, value);
+    }
+  });
+
+  const contentType = req.headers.get('content-type');
+  if (contentType) {
+    headers.set('content-type', contentType);
+  }
+
+  const auth = req.headers.get('authorization');
+  if (auth) {
+    headers.set('authorization', auth);
+  }
+
   headers.set('x-forwarded-host', req.headers.get('host') || '');
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
 
   try {
-    const body = ['GET', 'HEAD'].includes(req.method)
+    const body = ['GET', 'HEAD'].includes(req.method.toUpperCase())
       ? undefined
       : await req.arrayBuffer();
 
@@ -29,11 +61,25 @@ export async function proxyRequest(req: NextRequest, path: string): Promise<Next
       redirect: 'manual',
     });
 
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.delete('content-encoding');
-    responseHeaders.delete('content-length');
+    const responseHeaders = new Headers();
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase();
+      if (
+        ![
+          'content-encoding',
+          'content-length',
+          'transfer-encoding',
+          'connection',
+          'keep-alive',
+        ].includes(lower)
+      ) {
+        responseHeaders.set(key, value);
+      }
+    });
 
-    return new NextResponse(response.body, {
+    const responseData = await response.arrayBuffer();
+
+    return new NextResponse(responseData, {
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,
@@ -57,7 +103,6 @@ export async function proxyRequest(req: NextRequest, path: string): Promise<Next
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Next.js 16 proxy routing
   if (pathname.startsWith('/api/proxy/')) {
     const subPath = pathname.replace('/api/proxy/', '');
     return proxyRequest(request, subPath);

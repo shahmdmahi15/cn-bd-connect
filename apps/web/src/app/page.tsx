@@ -78,9 +78,13 @@ export default function App() {
         headers: { Authorization: `Bearer ${authToken}` },
       });
       if (res.ok) {
-        const user = await res.json();
-        setCurrentUser(user);
-        getSocket(authToken);
+        const user = await res.json().catch(() => null);
+        if (user) {
+          setCurrentUser(user);
+          getSocket(authToken);
+        } else {
+          handleLogout();
+        }
       } else {
         handleLogout();
       }
@@ -100,15 +104,20 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: authEmail, password: authPassword }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Login failed');
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const errorMsg = data
+          ? (Array.isArray(data.message) ? data.message.join(', ') : data.message || data.error)
+          : `Server error (${res.status})`;
+        throw new Error(errorMsg || 'Login failed');
+      }
 
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setCurrentUser(data.user);
       getSocket(data.token);
     } catch (err: any) {
-      setAuthError(err.message);
+      setAuthError(err.message || 'Login failed');
     }
   };
 
@@ -126,15 +135,20 @@ export default function App() {
           country: authCountry,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Registration failed');
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const errorMsg = data
+          ? (Array.isArray(data.message) ? data.message.join(', ') : data.message || data.error)
+          : `Server error (${res.status})`;
+        throw new Error(errorMsg || 'Registration failed');
+      }
 
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setCurrentUser(data.user);
       getSocket(data.token);
     } catch (err: any) {
-      setAuthError(err.message);
+      setAuthError(err.message || 'Registration failed');
     }
   };
 
@@ -160,12 +174,12 @@ export default function App() {
       ]);
 
       if (friendsRes.ok) {
-        const friendsList = await friendsRes.json();
-        setFriends(friendsList);
+        const friendsList = await friendsRes.json().catch(() => []);
+        setFriends(friendsList || []);
       }
       if (requestsRes.ok) {
-        const requestsData = await requestsRes.json();
-        setRequests(requestsData.incoming || []);
+        const requestsData = await requestsRes.json().catch(() => ({}));
+        setRequests(requestsData?.incoming || []);
       }
     } catch (err) {
       console.error('Error loading dashboard data:', err);
@@ -233,8 +247,13 @@ export default function App() {
         },
         body: JSON.stringify({ email: targetEmail.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Failed to send request');
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const errorMsg = data
+          ? (Array.isArray(data.message) ? data.message.join(', ') : data.message || data.error)
+          : `Server error (${res.status})`;
+        throw new Error(errorMsg || 'Failed to send request');
+      }
 
       setActionMessage({
         type: 'success',
@@ -243,7 +262,7 @@ export default function App() {
       setTargetEmail('');
       loadDashboardData();
     } catch (err: any) {
-      setActionMessage({ type: 'error', text: err.message });
+      setActionMessage({ type: 'error', text: err.message || 'Failed to send request' });
     }
   };
 
