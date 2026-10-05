@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { Logger } from '@nestjs/common';
 
 interface AuthenticatedSocket extends Socket {
@@ -48,7 +49,22 @@ export class SignalingGateway
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  // Real-time ping probe for live latency measurement (Dhaka <-> HK <-> China)
+  @SubscribeMessage('ping')
+  handlePing(
+    @ConnectedSocket() _client: AuthenticatedSocket,
+    @MessageBody() data: any,
+  ) {
+    const clientTime = typeof data === 'number' ? data : data?.clientTime || Date.now();
+    return {
+      clientTime,
+      serverTime: Date.now(),
+      region: 'Hong Kong Hub (ap-east-1)',
+    };
+  }
 
   async handleConnection(client: AuthenticatedSocket) {
     try {
@@ -143,16 +159,29 @@ export class SignalingGateway
 
     const { toUserId, isVideo, offer } = data;
 
-    // Check if callee is online
-    const calleeSockets = this.userSockets.get(toUserId);
-    if (!calleeSockets || calleeSockets.size === 0) {
-      client.emit('call:offline', { toUserId, message: 'User is currently offline' });
-      return;
-    }
-
     // Check if callee is busy
     if (this.activeCalls.has(toUserId)) {
       client.emit('call:busy', { toUserId, message: 'User is currently on another call' });
+      return;
+    }
+
+    // Dispatch high-priority background Web Push Notification to callee's device (iOS APNs / Android)
+    this.notificationsService
+      .sendPushToUser(toUserId, {
+        title: `📞 Incoming ${isVideo ? 'Video' : 'Voice'} Call`,
+        body: `${client.userPayload.name} is calling you on CN-BD Connect`,
+        tag: 'incoming-call',
+        data: { url: '/', callerId },
+      })
+      .catch((err) => this.logger.warn(`Push dispatch notice: ${err.message}`));
+
+    // Check if callee has active live websocket connections
+    const calleeSockets = this.userSockets.get(toUserId);
+    if (!calleeSockets || calleeSockets.size === 0) {
+      client.emit('call:offline', {
+        toUserId,
+        message: 'User is currently offline. A background push notification was dispatched to their phone.',
+      });
       return;
     }
 

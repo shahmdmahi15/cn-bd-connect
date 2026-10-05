@@ -27,6 +27,8 @@ import {
   Send,
   UserCheck,
   Trash2,
+  Bell,
+  BellRing,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -52,10 +54,29 @@ interface FriendRequest {
 
 type MobileTab = 'contacts' | 'connect' | 'telemetry';
 
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+
+  // Live Latency Probe to Hong Kong Server (Measured in Real Time)
+  const [liveRttMs, setLiveRttMs] = useState<number | null>(null);
+
+  // Background Push Notifications (iOS 16.4+ / Android / Desktop)
+  const [isPushSubscribed, setIsPushSubscribed] = useState(false);
+  const [isSubscribingPush, setIsSubscribingPush] = useState(false);
+  const [isSendingTestPush, setIsSendingTestPush] = useState(false);
 
   // Auth Form State
   const [isRegister, setIsRegister] = useState(false);
@@ -237,6 +258,142 @@ export default function App() {
       loadDashboardData();
     }
   }, [currentUser, token, loadDashboardData]);
+
+  // Continuous real-time latency probe to Hong Kong hub (every 3 seconds)
+  useEffect(() => {
+    if (!token || !currentUser) return;
+
+    let isMounted = true;
+    const probeLatency = () => {
+      const socket = getSocket(token);
+      const start = Date.now();
+      if (socket && socket.connected) {
+        socket.emit('ping', { clientTime: start }, (res: any) => {
+          if (!isMounted) return;
+          const rtt = Math.max(1, Date.now() - (res?.clientTime || start));
+          setLiveRttMs(rtt);
+        });
+      } else {
+        fetch('/api/proxy/health')
+          .then((res) => {
+            if (res.ok && isMounted) {
+              setLiveRttMs(Math.max(1, Date.now() - start));
+            }
+          })
+          .catch(() => {});
+      }
+    };
+
+    probeLatency();
+    const timer = setInterval(probeLatency, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, [token, currentUser]);
+
+  // Check initial push subscription status
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window) {
+      navigator.serviceWorker.ready
+        .then((reg) => reg.pushManager.getSubscription())
+        .then((sub) => {
+          if (sub) setIsPushSubscribed(true);
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  const handleEnableNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      alert(
+        'Push notifications are not supported in this browser.\n\nOn iPhone/iPad: Tap the Share button (⬆️) and select "Add to Home Screen" first!',
+      );
+      return;
+    }
+
+    setIsSubscribingPush(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setActionMessage({
+          type: 'error',
+          text: 'Notification permission was declined. Please allow notifications in browser or iOS settings.',
+        });
+        return;
+      }
+
+      // 1. Fetch server VAPID public key
+      const res = await fetch('/api/proxy/notifications/vapid-public-key');
+      if (!res.ok) throw new Error('Could not retrieve notification keys from server');
+      const { publicKey } = await res.json();
+
+      // 2. Subscribe service worker
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+      }
+
+      // 3. Register push subscription with backend
+      const subJson = sub.toJSON();
+      const saveRes = await fetch('/api/proxy/notifications/subscribe', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          endpoint: sub.endpoint,
+          keys: subJson.keys,
+        }),
+      });
+
+      if (!saveRes.ok) throw new Error('Failed to save push subscription on server');
+
+      setIsPushSubscribed(true);
+      setActionMessage({
+        type: 'success',
+        text: 'Background call notifications active! You will now receive calls when the screen is locked or app is closed.',
+      });
+    } catch (err: any) {
+      console.error('Push registration error:', err);
+      setActionMessage({
+        type: 'error',
+        text: err.message || 'Failed to activate background notifications',
+      });
+    } finally {
+      setIsSubscribingPush(false);
+    }
+  };
+
+  const handleTestNotification = async () => {
+    setIsSendingTestPush(true);
+    try {
+      const res = await fetch('/api/proxy/notifications/test', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setActionMessage({
+          type: 'success',
+          text: 'Test push notification sent! Check your notification center or lock screen.',
+        });
+      } else {
+        throw new Error('Failed to dispatch test notification');
+      }
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: err.message || 'Error sending test notification',
+      });
+    } finally {
+      setIsSendingTestPush(false);
+    }
+  };
 
   // 3. Real-Time Socket updates for online status & new requests
   useEffect(() => {
@@ -780,12 +937,117 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 font-mono text-[11px] bg-black/60 border border-white/10 px-3.5 py-1.5 rounded-full shadow-inner">
-              <span className="text-emerald-400">🇧🇩 Dhaka (~45ms)</span>
+            {/* Live Real-Time Latency Readout */}
+            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] bg-black/60 border border-white/10 px-3.5 py-2 rounded-full shadow-inner">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    (liveRttMs || 0) < 65
+                      ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
+                      : (liveRttMs || 0) < 140
+                        ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]'
+                        : 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]'
+                  } animate-pulse`}
+                />
+                <span className="text-white/50 text-[10px] uppercase tracking-wider">LIVE RTT:</span>
+                <span
+                  className={`font-bold ${
+                    (liveRttMs || 0) < 65
+                      ? 'text-emerald-400'
+                      : (liveRttMs || 0) < 140
+                        ? 'text-amber-400'
+                        : 'text-red-400'
+                  }`}
+                >
+                  {liveRttMs !== null ? `${liveRttMs} ms` : 'Measuring...'}
+                </span>
+              </div>
+              <span className="text-white/20">|</span>
+              <span className="text-emerald-400">
+                {currentUser.country === 'BD'
+                  ? `🇧🇩 Dhaka (${liveRttMs !== null ? `${liveRttMs}ms` : '~45ms'})`
+                  : '🇧🇩 Dhaka (~45ms)'}
+              </span>
               <span className="text-white/20">⇄</span>
               <span className="text-blue-400 font-bold">🇭🇰 HK Hub</span>
               <span className="text-white/20">⇄</span>
-              <span className="text-red-400">🇨🇳 China (~25ms)</span>
+              <span className="text-red-400">
+                {currentUser.country === 'CN'
+                  ? `🇨🇳 China (${liveRttMs !== null ? `${liveRttMs}ms` : '~25ms'})`
+                  : '🇨🇳 China (~25ms)'}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Background Call Notifications Card (iOS 16.4+ & Android Lock Screen) */}
+        <div className="rounded-3xl border border-white/15 bg-white/[0.03] p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20 shadow shrink-0">
+                {isPushSubscribed ? (
+                  <BellRing className="h-5 w-5 text-emerald-400 animate-pulse" />
+                ) : (
+                  <Bell className="h-5 w-5 text-blue-400" />
+                )}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-white tracking-wide">
+                    Background Call Notifications (iOS & Android)
+                  </h3>
+                  {isPushSubscribed ? (
+                    <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-[10px]">
+                      Active · Ready for Lock Screen
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-400 text-[10px]">
+                      Not Enabled
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-xs text-white/50 mt-1 max-w-xl">
+                  {isPushSubscribed
+                    ? 'Your device is registered with Apple APNs / WebPush. When someone calls you while your screen is locked or the app is closed, you will receive an instant call alert.'
+                    : 'Receive incoming video & voice calls even when your office is closed, your phone screen is locked, or CN-BD Connect is in the background.'}
+                </p>
+                <p className="text-[11px] text-white/40 mt-1">
+                  📱 <span className="font-semibold text-white/60">iPhone / iPad notice:</span> On iOS Safari, tap the Share button (⬆️) and select <span className="text-blue-400 font-semibold">&ldquo;Add to Home Screen&rdquo;</span> first for lock screen background notifications.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto">
+              {isPushSubscribed ? (
+                <Button
+                  onClick={handleTestNotification}
+                  disabled={isSendingTestPush}
+                  variant="outline"
+                  size="sm"
+                  className="rounded-xl border-white/20 bg-white/5 text-xs text-emerald-400 hover:text-white hover:bg-emerald-600/20 w-full sm:w-auto"
+                >
+                  {isSendingTestPush ? (
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                  ) : (
+                    <Zap className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  Send Test Alert
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleEnableNotifications}
+                  disabled={isSubscribingPush}
+                  size="sm"
+                  className="rounded-xl bg-blue-600/90 hover:bg-blue-500 text-white text-xs font-semibold shadow-[0_4px_15px_rgba(59,130,246,0.4)] border border-white/20 w-full sm:w-auto"
+                >
+                  {isSubscribingPush ? (
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                  ) : (
+                    <Bell className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  Enable Notifications
+                </Button>
+              )}
             </div>
           </div>
         </div>

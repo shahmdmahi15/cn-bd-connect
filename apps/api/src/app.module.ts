@@ -5,6 +5,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { FriendsModule } from './friends/friends.module.js';
 import { TurnModule } from './turn/turn.module.js';
 import { SignalingModule } from './signaling/signaling.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 
@@ -19,6 +20,7 @@ import { AppService } from './app.service.js';
     FriendsModule,
     TurnModule,
     SignalingModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
