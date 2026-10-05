@@ -21,6 +21,8 @@ infra/certbot/conf/
 infra/certbot/www/
 *.pem
 *.key
+*.pem*
+cn-bd-connect-ssh-key.pem
 *:Zone.Identifier
 
 # Logs

@@ -58,15 +58,15 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.LIGHTSAIL_HOST }}
-          username: ${{ secrets.LIGHTSAIL_USERNAME }}
-          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          host: ${{ secrets.IP_ADDRESS }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
           port: 22
           script_stop: true
           script: |
             echo "==> Deploying CN-BD Connect to AWS Lightsail (Hong Kong)..."
             
-            APP_DIR="/home/${{ secrets.LIGHTSAIL_USERNAME }}/cn-bd-connect"
+            APP_DIR="/home/${{ secrets.USERNAME }}/cn-bd-connect"
 
             if [ ! -d "$APP_DIR" ]; then
               echo "==> Cloning repository for the first time..."
@@ -74,6 +74,11 @@ jobs:
             fi
 
             cd "$APP_DIR"
+
+            if [ ! -f .env ]; then
+              echo "==> Initializing default .env from template..."
+              cp .env.example .env
+            fi
 
             echo "==> Fetching latest changes from Git..."
             git fetch origin master
