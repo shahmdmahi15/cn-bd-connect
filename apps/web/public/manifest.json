@@ -4,9 +4,11 @@
   "description": "Ultra low-latency cross-border calling between China and Bangladesh via dedicated Hong Kong relay",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#0f172a",
-  "orientation": "portrait-primary",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "any",
+  "categories": ["communication", "social", "utilities"],
   "icons": [
     {
       "src": "/icons/icon-72x72.png",

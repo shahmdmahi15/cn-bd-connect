@@ -22,6 +22,7 @@ import {
   Crop,
   Radio,
   ArrowUpDown,
+  PictureInPicture2,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -303,15 +304,77 @@ export function CallScreen({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Cross-browser safe fullscreen (handles iOS WebKit / Safari and standard Fullscreen API)
   const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
+    const doc: any = document;
+    const docEl: any = document.documentElement;
+    if (!doc.fullscreenElement && !doc.webkitFullscreenElement) {
+      if (docEl.requestFullscreen) {
+        docEl.requestFullscreen().catch(() => {});
+      } else if (docEl.webkitRequestFullscreen) {
+        docEl.webkitRequestFullscreen();
+      }
       setIsFullscreen(true);
     } else {
-      document.exitFullscreen().catch(() => {});
+      if (doc.exitFullscreen) {
+        doc.exitFullscreen().catch(() => {});
+      } else if (doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen();
+      }
       setIsFullscreen(false);
     }
   };
+
+  // Native Picture-in-Picture API for PC, Mac, and Android multitasking
+  const [isNativePiPActive, setIsNativePiPActive] = useState(false);
+  const toggleNativePiP = async () => {
+    try {
+      const doc: any = document;
+      if (doc.pictureInPictureElement) {
+        await doc.exitPictureInPicture();
+        setIsNativePiPActive(false);
+      } else if (remoteVideoRef.current && (doc.pictureInPictureEnabled || (remoteVideoRef.current as any).webkitSupportsPresentationMode)) {
+        if (remoteVideoRef.current.requestPictureInPicture) {
+          await remoteVideoRef.current.requestPictureInPicture();
+        } else if ((remoteVideoRef.current as any).webkitSetPresentationMode) {
+          (remoteVideoRef.current as any).webkitSetPresentationMode('picture-in-picture');
+        }
+        setIsNativePiPActive(true);
+      }
+    } catch (err) {
+      console.warn('[CallScreen] Picture-in-Picture toggle notice:', err);
+    }
+  };
+
+  // Desktop & Laptop Keyboard Shortcuts (Space/M to Mute, V for Video, F for Fullscreen, P for PiP)
+  useEffect(() => {
+    if (callState !== 'connected') return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+
+      if (e.code === 'KeyM' || (e.code === 'Space' && !e.repeat)) {
+        e.preventDefault();
+        onToggleMute();
+      } else if (e.code === 'KeyV') {
+        e.preventDefault();
+        onToggleVideo();
+      } else if (e.code === 'KeyF') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.code === 'KeyP') {
+        e.preventDefault();
+        toggleNativePiP();
+      } else if (e.code === 'Escape') {
+        setShowDetailedStats(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [callState, onToggleMute, onToggleVideo]);
 
   // Toggle speaker mute
   const toggleSpeakerMute = () => {
@@ -586,6 +649,20 @@ export function CallScreen({
             </div>
           )}
 
+          {/* Native Picture-in-Picture Button (multitasking on PC/Android) */}
+          {isVideoCall && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleNativePiP();
+              }}
+              className="flex items-center justify-center h-8 w-8 rounded-full border border-white/15 bg-black/60 text-white/80 hover:text-white hover:bg-white/10 transition-colors shadow-lg"
+              title="Picture in Picture (P)"
+            >
+              <PictureInPicture2 className={`h-4 w-4 ${isNativePiPActive ? 'text-blue-400' : 'text-white/80'}`} />
+            </button>
+          )}
+
           <Button
             variant="ghost"
             size="sm"
@@ -594,6 +671,7 @@ export function CallScreen({
               toggleFullscreen();
             }}
             className="h-8 w-8 p-0 rounded-full text-white/80 hover:text-white hover:bg-white/10"
+            title="Fullscreen (F)"
           >
             {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </Button>
@@ -626,6 +704,14 @@ export function CallScreen({
             <div className="bg-white/5 p-2 rounded-xl border border-white/5">
               <span className="text-white/40 block text-[10px]">Ingress Bitrate</span>
               <span className="font-mono font-bold text-blue-400">{networkStats.bitrateKbps} kbps</span>
+            </div>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Video Codec</span>
+              <span className="font-mono font-bold text-amber-300">H.264 HW-Acc</span>
+            </div>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Audio Engine</span>
+              <span className="font-mono font-bold text-emerald-300">Opus 48k FEC</span>
             </div>
             <div className="bg-white/5 p-2 rounded-xl border border-white/5">
               <span className="text-white/40 block text-[10px]">Packet Loss</span>

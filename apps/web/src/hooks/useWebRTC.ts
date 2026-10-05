@@ -125,14 +125,14 @@ class RingtoneController {
 
 const ringtone = new RingtoneController();
 
-// Munge SDP for studio-grade Opus 128kbps with Forward Error Correction (FEC)
+// Studio-grade Opus audio + Ultra-high bitrate 4.5Mbps 1080p video with H.264 prioritization
 function enhanceSdp(sdp: string): string {
-  // 1. Boost Opus audio parameters: 128kbps, stereo, in-band FEC for packet loss resilience
+  // 1. Boost Opus audio parameters: 128kbps, stereo, in-band FEC for packet loss resilience, no DTX clipping
   let enhanced = sdp.replace(
     /(a=fmtp:\d+ .*)/g,
     (match) => {
       if (match.includes('opus')) {
-        return `${match};minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1`;
+        return `${match};minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1;dtx=0`;
       }
       return match;
     },
@@ -143,7 +143,7 @@ function enhanceSdp(sdp: string): string {
   const match = enhanced.match(opusRtpMapRegex);
   if (match) {
     const pt = match[1];
-    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1`;
+    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1;dtx=0`;
     if (!enhanced.includes(`a=fmtp:${pt}`)) {
       enhanced = enhanced.replace(
         opusRtpMapRegex,
@@ -152,7 +152,62 @@ function enhanceSdp(sdp: string): string {
     }
   }
 
+  // 2. Set maximum video bitrate ceiling in SDP (4.5 Mbps for pristine 1080p60)
+  enhanced = enhanced.replace(/(m=video [^\r\n]+)/, (mLine) => {
+    return `${mLine}\r\nb=AS:4500\r\nb=TIAS:4500000`;
+  });
+
+  // 3. Reorder video codecs in SDP so H.264 payload types are prioritized for hardware acceleration
+  const h264Payloads: string[] = [];
+  const rtpmapRegex = /a=rtpmap:(\d+)\s+H264\/90000/gi;
+  let rtpMatch;
+  while ((rtpMatch = rtpmapRegex.exec(enhanced)) !== null) {
+    h264Payloads.push(rtpMatch[1]);
+  }
+
+  if (h264Payloads.length > 0) {
+    enhanced = enhanced.replace(
+      /(m=video \d+ [A-Z\/]+ )([0-9 ]+)/,
+      (_line, prefix, payloadStr) => {
+        const payloads = payloadStr.trim().split(/\s+/);
+        const nonH264 = payloads.filter((p: string) => !h264Payloads.includes(p));
+        const reordered = [...h264Payloads, ...nonH264].join(' ');
+        return `${prefix}${reordered}`;
+      },
+    );
+  }
+
   return enhanced;
+}
+
+// Hardware acceleration helper: Prioritize H.264 video codec on RTCPeerConnection transceivers
+function preferH264Codecs(pc: RTCPeerConnection) {
+  try {
+    if (typeof RTCRtpReceiver === 'undefined' || !('getCapabilities' in RTCRtpReceiver)) return;
+    const capabilities = RTCRtpReceiver.getCapabilities('video');
+    if (!capabilities || !capabilities.codecs) return;
+
+    const h264Codecs = capabilities.codecs.filter(
+      (c) => c.mimeType.toLowerCase() === 'video/h264',
+    );
+    const otherCodecs = capabilities.codecs.filter(
+      (c) => c.mimeType.toLowerCase() !== 'video/h264',
+    );
+    const sortedCodecs = [...h264Codecs, ...otherCodecs];
+
+    pc.getTransceivers().forEach((transceiver) => {
+      if (
+        (transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video') &&
+        transceiver.setCodecPreferences
+      ) {
+        try {
+          transceiver.setCodecPreferences(sortedCodecs);
+        } catch {}
+      }
+    });
+  } catch (err) {
+    console.warn('[WebRTC] setCodecPreferences notice:', err);
+  }
 }
 
 export function useWebRTC(currentUser: { id: string; name: string } | null) {
@@ -217,7 +272,32 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     ];
   }, []);
 
-  // Acquire local camera and microphone stream with studio quality
+  const wakeLockRef = useRef<any>(null);
+
+  const acquireWakeLock = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
+      try {
+        const lock = await (navigator as any).wakeLock.request('screen');
+        wakeLockRef.current = lock;
+        lock.addEventListener('release', () => {
+          wakeLockRef.current = null;
+        });
+      } catch (e) {
+        console.warn('[WebRTC] WakeLock request notice:', e);
+      }
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(() => {
+    if (wakeLockRef.current) {
+      try {
+        wakeLockRef.current.release();
+      } catch {}
+      wakeLockRef.current = null;
+    }
+  }, []);
+
+  // Acquire local camera and microphone stream with studio quality (1080p60 -> 720p30 -> Basic fallback cascade)
   const getMediaStream = useCallback(
     async (video = true): Promise<MediaStream> => {
       if (localStreamRef.current) {
@@ -227,49 +307,77 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
         }
       }
 
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 2,
-          sampleRate: 48000,
-        },
-        video: video
-          ? {
-              facingMode: facingModeRef.current,
-              width: { ideal: 1920, max: 1920 },
-              height: { ideal: 1080, max: 1080 },
-              frameRate: { ideal: 60, max: 60 },
-            }
-          : false,
+      const audioConfig = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 2,
+        sampleRate: 48000,
       };
 
+      // Cascade Tier 1: Pristine Full HD 1080p @ 60fps
+      if (video) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConfig,
+            video: {
+              facingMode: facingModeRef.current,
+              width: { ideal: 1920, min: 1280 },
+              height: { ideal: 1080, min: 720 },
+              frameRate: { ideal: 60, min: 24, max: 60 },
+            },
+          });
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+          return stream;
+        } catch (tier1Err) {
+          console.warn('[WebRTC] 1080p60 unavailable, cascading to 720p HD:', tier1Err);
+        }
+
+        // Cascade Tier 2: 720p HD @ 30fps
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConfig,
+            video: {
+              facingMode: facingModeRef.current,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 },
+            },
+          });
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+          return stream;
+        } catch (tier2Err) {
+          console.warn('[WebRTC] 720p unavailable, cascading to flexible video:', tier2Err);
+        }
+
+        // Cascade Tier 3: Flexible video
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: audioConfig,
+            video: { facingMode: facingModeRef.current },
+          });
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+          return stream;
+        } catch (tier3Err) {
+          console.error('[WebRTC] Flexible video failed, trying audio-only:', tier3Err);
+        }
+      }
+
+      // Audio-only fallback or voice call
       try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConfig,
+          video: false,
+        });
         localStreamRef.current = stream;
         setLocalStream(stream);
         return stream;
-      } catch (err) {
-        console.warn('Initial getUserMedia failed, retrying with flexible constraints:', err);
-        try {
-          const fallbackStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-            video: video
-              ? {
-                  facingMode: facingModeRef.current,
-                  width: { ideal: 1280 },
-                  height: { ideal: 720 },
-                }
-              : false,
-          });
-          localStreamRef.current = fallbackStream;
-          setLocalStream(fallbackStream);
-          return fallbackStream;
-        } catch (fallbackErr) {
-          console.error('getUserMedia failed completely:', fallbackErr);
-          throw fallbackErr;
-        }
+      } catch (audioErr) {
+        console.error('getUserMedia failed completely:', audioErr);
+        throw audioErr;
       }
     },
     [],
@@ -286,7 +394,9 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
           params.encodings = [{}];
         }
         if (sender.track.kind === 'video') {
-          params.encodings[0].maxBitrate = 3500000; // 3.5 Mbps HD 1080p
+          params.encodings[0].maxBitrate = 4500000; // 4.5 Mbps top-notch 1080p
+          params.encodings[0].maxFramerate = 60;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
           params.encodings[0].networkPriority = 'high';
         } else if (sender.track.kind === 'audio') {
           params.encodings[0].maxBitrate = 128000; // 128 kbps CD audio
@@ -417,6 +527,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
   // Reset all call states and hardware channels
   const resetCall = useCallback(() => {
     ringtone.stop();
+    releaseWakeLock();
 
     if (statsIntervalRef.current) {
       clearInterval(statsIntervalRef.current);
@@ -454,7 +565,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     setIsPeerVideoOff(false);
     setIsScreenSharing(false);
     setNetworkStats(null);
-  }, []);
+  }, [releaseWakeLock]);
 
   // Initialize RTCPeerConnection with optimal ICE parameters and DataChannel
   const createPeerConnection = useCallback(
@@ -562,6 +673,14 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
         if (pc.iceConnectionState === 'failed') {
           console.warn('[WebRTC] ICE connection failed, restarting ICE...');
           pc.restartIce();
+        } else if (pc.iceConnectionState === 'disconnected') {
+          console.warn('[WebRTC] ICE disconnected, checking if recovery needed...');
+          setTimeout(() => {
+            if (pc.iceConnectionState === 'disconnected') {
+              console.warn('[WebRTC] Still disconnected after 3s, executing ICE restart...');
+              pc.restartIce();
+            }
+          }, 3000);
         }
       };
 
@@ -570,6 +689,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
         if (pc.connectionState === 'connected') {
           setCallState('connected');
           ringtone.stop();
+          acquireWakeLock();
           startStatsMonitoring(pc);
           tuneSenderParameters(pc);
         } else if (pc.connectionState === 'failed') {
@@ -585,7 +705,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
 
       return pc;
     },
-    [fetchIceServers, resetCall, startStatsMonitoring, tuneSenderParameters],
+    [fetchIceServers, resetCall, acquireWakeLock, startStatsMonitoring, tuneSenderParameters],
   );
 
   // 1. INITIATE CALL (Outbound)
@@ -602,6 +722,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
 
         // Add local tracks to peer connection
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        preferH264Codecs(pc);
 
         // Create SDP Offer with offerToReceive constraints
         const rawOffer = await pc.createOffer({
@@ -650,6 +771,7 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
 
       // Add local audio and video tracks
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      preferH264Codecs(pc);
 
       // Apply incoming remote SDP offer
       await pc.setRemoteDescription(
@@ -781,14 +903,23 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
       facingModeRef.current === 'user' ? 'environment' : 'user';
 
     try {
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingModeRef.current,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      });
+      let newStream: MediaStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facingModeRef.current,
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            frameRate: { ideal: 60 },
+          },
+          audio: false,
+        });
+      } catch {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facingModeRef.current },
+          audio: false,
+        });
+      }
 
       const newVideoTrack = newStream.getVideoTracks()[0];
       const sender = pcRef.current
