@@ -87,8 +87,9 @@ jobs:
             echo "==> Ensuring required directories exist..."
             mkdir -p infra/certbot/conf infra/certbot/www
 
-            echo "==> Building and deploying Docker containers..."
-            docker compose build --pull
+            echo "==> Building and deploying Docker containers sequentially..."
+            docker compose build api
+            docker compose build web
             docker compose up -d
 
             echo "==> Running PostgreSQL database migrations via Prisma..."
