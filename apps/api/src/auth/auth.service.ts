@@ -10,6 +10,8 @@ import bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 
 @Injectable()
 export class AuthService {
@@ -37,6 +39,7 @@ export class AuthService {
         name: dto.name,
         password: hashedPassword,
         country: dto.country.toUpperCase(),
+        bio: 'Available',
       },
       select: {
         id: true,
@@ -44,6 +47,7 @@ export class AuthService {
         name: true,
         country: true,
         avatarUrl: true,
+        bio: true,
         createdAt: true,
       },
     });
@@ -76,6 +80,7 @@ export class AuthService {
       name: user.name,
       country: user.country,
       avatarUrl: user.avatarUrl,
+      bio: user.bio,
       createdAt: user.createdAt,
     };
 
@@ -96,6 +101,7 @@ export class AuthService {
         name: true,
         country: true,
         avatarUrl: true,
+        bio: true,
         isOnline: true,
         lastSeen: true,
         createdAt: true,
@@ -107,6 +113,59 @@ export class AuthService {
     }
 
     return user;
+  }
+
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.name ? { name: dto.name.trim() } : {}),
+        ...(dto.country ? { country: dto.country.toUpperCase() } : {}),
+        ...(dto.avatarUrl !== undefined ? { avatarUrl: dto.avatarUrl } : {}),
+        ...(dto.bio !== undefined ? { bio: dto.bio.trim() } : {}),
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        country: true,
+        avatarUrl: true,
+        bio: true,
+        isOnline: true,
+        lastSeen: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return updated;
+  }
+
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const isMatch = await bcrypt.compare(dto.currentPassword, user.password);
+    if (!isMatch) {
+      throw new UnauthorizedException('Current password does not match');
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(dto.newPassword, salt);
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    return { message: 'Password successfully updated' };
   }
 
   generateToken(user: { id: string; email: string; name: string; country: string }) {

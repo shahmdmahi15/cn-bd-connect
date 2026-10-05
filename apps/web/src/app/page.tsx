@@ -29,6 +29,17 @@ import {
   Trash2,
   Bell,
   BellRing,
+  Settings as SettingsIcon,
+  User as UserIcon,
+  Volume2,
+  Sliders,
+  KeyRound,
+  Shield,
+  Smartphone,
+  CheckCheck,
+  PhoneCall,
+  UserX,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,12 +47,15 @@ import { Badge } from '@/components/ui/badge';
 import { CallScreen } from '@/components/CallScreen';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { getSocket, disconnectSocket } from '@/lib/socket';
+import { ringtoneService } from '@/lib/ringtone';
 
 interface User {
   id: string;
   name: string;
   email: string;
   country: string;
+  avatarUrl?: string | null;
+  bio?: string | null;
   isOnline?: boolean;
 }
 
@@ -52,7 +66,7 @@ interface FriendRequest {
   createdAt: string;
 }
 
-type MobileTab = 'contacts' | 'connect' | 'telemetry';
+type TabType = 'friends' | 'telemetry' | 'settings' | 'profile';
 
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -78,6 +92,9 @@ export default function App() {
   const [isSubscribingPush, setIsSubscribingPush] = useState(false);
   const [isSendingTestPush, setIsSendingTestPush] = useState(false);
 
+  // Navigation State
+  const [activeTab, setActiveTab] = useState<TabType>('friends');
+
   // Auth Form State
   const [isRegister, setIsRegister] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
@@ -87,10 +104,11 @@ export default function App() {
   const [authError, setAuthError] = useState('');
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
-  // Dashboard State
+  // Dashboard & Friend State
   const [friends, setFriends] = useState<User[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
   const [outgoingRequests, setOutgoingRequests] = useState<FriendRequest[]>([]);
+  const [friendsFilter, setFriendsFilter] = useState<'all' | 'online' | 'requests'>('all');
   const [targetEmail, setTargetEmail] = useState('');
   const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -99,10 +117,26 @@ export default function App() {
     text: string;
   } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [copiedEmail, setCopiedEmail] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
 
-  // Mobile Bottom Tab Navigation
-  const [activeTab, setActiveTab] = useState<MobileTab>('contacts');
+  // Profile Form State
+  const [profileName, setProfileName] = useState('');
+  const [profileBio, setProfileBio] = useState('');
+  const [profileCountry, setProfileCountry] = useState<'BD' | 'CN'>('BD');
+  const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+
+  // Password Change Form State
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+
+  // Settings State
+  const [ringtoneVolume, setRingtoneVolume] = useState<number>(0.8);
+  const [isTestingRingtone, setIsTestingRingtone] = useState<boolean>(false);
+  const [videoQuality, setVideoQuality] = useState<'1080p' | '720p' | '480p'>('1080p');
+  const [noiseSuppression, setNoiseSuppression] = useState<boolean>(true);
+  const [echoCancellation, setEchoCancellation] = useState<boolean>(true);
 
   // WebRTC Hook
   const webrtc = useWebRTC(currentUser);
@@ -127,6 +161,9 @@ export default function App() {
         const user = await res.json().catch(() => null);
         if (user) {
           setCurrentUser(user);
+          setProfileName(user.name || '');
+          setProfileBio(user.bio || 'Available');
+          setProfileCountry((user.country as 'BD' | 'CN') || 'BD');
           getSocket(authToken);
         } else {
           handleLogout();
@@ -164,6 +201,9 @@ export default function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setCurrentUser(data.user);
+      setProfileName(data.user.name || '');
+      setProfileBio(data.user.bio || 'Available');
+      setProfileCountry((data.user.country as 'BD' | 'CN') || 'BD');
       getSocket(data.token);
     } catch (err: any) {
       setAuthError(err.message || 'Login failed');
@@ -200,6 +240,9 @@ export default function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setCurrentUser(data.user);
+      setProfileName(data.user.name || '');
+      setProfileBio(data.user.bio || 'Available');
+      setProfileCountry((data.user.country as 'BD' | 'CN') || 'BD');
       getSocket(data.token);
     } catch (err: any) {
       setAuthError(err.message || 'Registration failed');
@@ -259,7 +302,7 @@ export default function App() {
     }
   }, [currentUser, token, loadDashboardData]);
 
-  // Continuous real-time latency probe to Hong Kong hub (every 3 seconds)
+  // 3. Continuous Real-Time Latency Probe to Hong Kong Server (Every 3 seconds)
   useEffect(() => {
     if (!token || !currentUser) return;
 
@@ -292,7 +335,40 @@ export default function App() {
     };
   }, [token, currentUser]);
 
-  // Check initial push subscription status
+  // 4. Handle Incoming Call from Push Notification / Deep-link Click
+  useEffect(() => {
+    // A. Listen for Service Worker postMessage
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+      const handleSwMessage = (event: MessageEvent) => {
+        if (event.data?.type === 'OPEN_INCOMING_CALL') {
+          console.log('[App] Opened incoming call from notification:', event.data);
+          webrtc.checkPendingCall();
+        } else if (event.data?.type === 'INCOMING_CALL_DECLINED') {
+          webrtc.rejectCall();
+        }
+      };
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+      return () => {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      };
+    }
+  }, [webrtc]);
+
+  useEffect(() => {
+    // B. Check URL query params on mount: ?incomingCall=1
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('incomingCall') === '1') {
+        console.log('[App] Deep-link with incomingCall detected, probing pending call...');
+        const timer = setTimeout(() => {
+          webrtc.checkPendingCall();
+        }, 600);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [webrtc]);
+
+  // 5. Check Initial Push Subscription Status
   useEffect(() => {
     if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window) {
       navigator.serviceWorker.ready
@@ -304,6 +380,7 @@ export default function App() {
     }
   }, []);
 
+  // 6. Enable Web Push Notifications
   const handleEnableNotifications = async () => {
     if (typeof window === 'undefined' || !('Notification' in window)) {
       alert(
@@ -323,12 +400,12 @@ export default function App() {
         return;
       }
 
-      // 1. Fetch server VAPID public key
+      // Fetch server VAPID public key
       const res = await fetch('/api/proxy/notifications/vapid-public-key');
       if (!res.ok) throw new Error('Could not retrieve notification keys from server');
       const { publicKey } = await res.json();
 
-      // 2. Subscribe service worker
+      // Subscribe service worker
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
       if (!sub) {
@@ -338,7 +415,7 @@ export default function App() {
         });
       }
 
-      // 3. Register push subscription with backend
+      // Register push subscription with backend
       const subJson = sub.toJSON();
       const saveRes = await fetch('/api/proxy/notifications/subscribe', {
         method: 'POST',
@@ -348,142 +425,72 @@ export default function App() {
         },
         body: JSON.stringify({
           endpoint: sub.endpoint,
-          keys: subJson.keys,
+          keys: {
+            p256dh: subJson.keys?.p256dh,
+            auth: subJson.keys?.auth,
+          },
         }),
       });
 
-      if (!saveRes.ok) throw new Error('Failed to save push subscription on server');
+      if (!saveRes.ok) throw new Error('Failed to save subscription on server');
 
       setIsPushSubscribed(true);
       setActionMessage({
         type: 'success',
-        text: 'Background call notifications active! You will now receive calls when the screen is locked or app is closed.',
+        text: 'Lock-screen call notifications successfully enabled!',
       });
     } catch (err: any) {
-      console.error('Push registration error:', err);
+      console.error('Push notification error:', err);
       setActionMessage({
         type: 'error',
-        text: err.message || 'Failed to activate background notifications',
+        text: err.message || 'Failed to enable notifications',
       });
     } finally {
       setIsSubscribingPush(false);
     }
   };
 
-  const handleTestNotification = async () => {
+  // 7. Send Test Push Alert
+  const handleSendTestPush = async () => {
+    if (!token) return;
     setIsSendingTestPush(true);
     try {
       const res = await fetch('/api/proxy/notifications/test', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        setActionMessage({
-          type: 'success',
-          text: 'Test push notification sent! Check your notification center or lock screen.',
-        });
-      } else {
-        throw new Error('Failed to dispatch test notification');
-      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.message || 'Failed to send test alert');
+
+      setActionMessage({
+        type: 'success',
+        text: 'Test alert sent! Lock your phone or check your notification shade.',
+      });
     } catch (err: any) {
       setActionMessage({
         type: 'error',
-        text: err.message || 'Error sending test notification',
+        text: err.message || 'Failed to send test push alert',
       });
     } finally {
       setIsSendingTestPush(false);
     }
   };
 
-  // 3. Real-Time Socket updates for online status & new requests
-  useEffect(() => {
-    if (!currentUser || !token) return;
-    const socket = getSocket(token);
+  // 8. Test Ringtone Preview
+  const handleTestRingtone = async () => {
+    setIsTestingRingtone(true);
+    await ringtoneService.testRingtone(ringtoneVolume);
+    setIsTestingRingtone(false);
+  };
 
-    const handleUserOnline = ({ userId }: { userId: string }) => {
-      setFriends((prev) =>
-        prev.map((f) => (f.id === userId ? { ...f, isOnline: true } : f)),
-      );
-    };
-
-    const handleUserOffline = ({ userId }: { userId: string }) => {
-      setFriends((prev) =>
-        prev.map((f) => (f.id === userId ? { ...f, isOnline: false } : f)),
-      );
-    };
-
-    const handleFriendRequest = (request: FriendRequest) => {
-      setIncomingRequests((prev) => [
-        request,
-        ...prev.filter((r) => r.id !== request.id),
-      ]);
-      setActionMessage({
-        type: 'success',
-        text: `New friend request from ${request.sender?.name || 'a friend'}!`,
-      });
-    };
-
-    const handleFriendAccepted = (newFriend: User) => {
-      setFriends((prev) => [
-        newFriend,
-        ...prev.filter((f) => f.id !== newFriend.id),
-      ]);
-      setIncomingRequests((prev) =>
-        prev.filter((r) => r.sender?.id !== newFriend.id),
-      );
-      setOutgoingRequests((prev) =>
-        prev.filter((r) => r.receiver?.id !== newFriend.id),
-      );
-      setActionMessage({
-        type: 'success',
-        text: `${newFriend.name} accepted your friend request! You can now call each other.`,
-      });
-    };
-
-    const handleFriendCanceled = ({ requestId }: { requestId: string }) => {
-      setIncomingRequests((prev) => prev.filter((r) => r.id !== requestId));
-    };
-
-    const handleFriendRejected = ({ requestId }: { requestId: string }) => {
-      setOutgoingRequests((prev) => prev.filter((r) => r.id !== requestId));
-    };
-
-    socket.on('user:online', handleUserOnline);
-    socket.on('user:offline', handleUserOffline);
-    socket.on('friend:request', handleFriendRequest);
-    socket.on('friend:request_received', handleFriendRequest);
-    socket.on('friend:accepted', handleFriendAccepted);
-    socket.on('friend:request_accepted', handleFriendAccepted);
-    socket.on('friend:canceled', handleFriendCanceled);
-    socket.on('friend:rejected', handleFriendRejected);
-
-    return () => {
-      socket.off('user:online', handleUserOnline);
-      socket.off('user:offline', handleUserOffline);
-      socket.off('friend:request', handleFriendRequest);
-      socket.off('friend:request_received', handleFriendRequest);
-      socket.off('friend:accepted', handleFriendAccepted);
-      socket.off('friend:request_accepted', handleFriendAccepted);
-      socket.off('friend:canceled', handleFriendCanceled);
-      socket.off('friend:rejected', handleFriendRejected);
-    };
-  }, [currentUser, token]);
-
-  // 4. Send Friend Request
-  const handleSendRequest = async (e: React.FormEvent) => {
+  // 9. Friend Request Actions
+  const handleSendFriendRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    const email = targetEmail.trim().toLowerCase();
-    if (!email) return;
-
-    if (email === currentUser?.email.toLowerCase()) {
-      setActionMessage({
-        type: 'error',
-        text: 'You cannot send a friend request to your own email.',
-      });
-      return;
-    }
+    if (!targetEmail.trim() || !token) return;
 
     setIsSendingRequest(true);
+    setActionMessage(null);
+
     try {
       const res = await fetch('/api/proxy/friends/request', {
         method: 'POST',
@@ -491,86 +498,82 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: targetEmail.trim() }),
       });
+
       const data = await res.json().catch(() => null);
+
       if (!res.ok) {
-        throw new Error(data?.message || 'Could not send friend request');
+        throw new Error(data?.message || 'Failed to send friend request');
       }
 
+      setTargetEmail('');
       setActionMessage({
         type: 'success',
-        text: `Friend request dispatched to ${email}! Waiting for their acceptance.`,
+        text: `Friend request sent to ${data.receiver?.name || 'user'}!`,
       });
-      setTargetEmail('');
       loadDashboardData();
     } catch (err: any) {
       setActionMessage({
         type: 'error',
-        text: err.message || 'Error sending friend request',
+        text: err.message || 'Could not send friend request',
       });
     } finally {
       setIsSendingRequest(false);
     }
   };
 
-  // 5. Accept Friend Request
   const handleAcceptRequest = async (requestId: string) => {
+    if (!token) return;
     try {
       const res = await fetch(`/api/proxy/friends/requests/${requestId}/accept`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        setActionMessage({
-          type: 'success',
-          text: 'Friend request accepted! You can now call each other anytime.',
-        });
+        setActionMessage({ type: 'success', text: 'Friend request accepted!' });
         loadDashboardData();
       }
-    } catch (err) {
-      console.error('Accept request error:', err);
+    } catch {
+      setActionMessage({ type: 'error', text: 'Failed to accept request' });
     }
   };
 
-  // 6. Reject Friend Request
   const handleRejectRequest = async (requestId: string) => {
+    if (!token) return;
     try {
       const res = await fetch(`/api/proxy/friends/requests/${requestId}/reject`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        setIncomingRequests((prev) => prev.filter((r) => r.id !== requestId));
+        setActionMessage({ type: 'success', text: 'Friend request declined.' });
         loadDashboardData();
       }
-    } catch (err) {
-      console.error('Reject request error:', err);
+    } catch {
+      setActionMessage({ type: 'error', text: 'Failed to reject request' });
     }
   };
 
-  // 7. Cancel Sent Request
   const handleCancelRequest = async (requestId: string) => {
+    if (!token) return;
     try {
       const res = await fetch(`/api/proxy/friends/requests/${requestId}/cancel`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        setOutgoingRequests((prev) => prev.filter((r) => r.id !== requestId));
-        setActionMessage({
-          type: 'success',
-          text: 'Friend request canceled.',
-        });
+        setActionMessage({ type: 'success', text: 'Friend request cancelled.' });
+        loadDashboardData();
       }
-    } catch (err) {
-      console.error('Cancel request error:', err);
+    } catch {
+      setActionMessage({ type: 'error', text: 'Failed to cancel request' });
     }
   };
 
-  // 8. Remove Friend
   const handleRemoveFriend = async (friendId: string, friendName: string) => {
-    if (!confirm(`Remove ${friendName} from your contacts?`)) return;
+    if (!token) return;
+    if (!confirm(`Are you sure you want to remove ${friendName} from your friends?`)) return;
     try {
       const res = await fetch(`/api/proxy/friends/${friendId}/remove`, {
         method: 'POST',
@@ -578,90 +581,150 @@ export default function App() {
       });
       if (res.ok) {
         setFriends((prev) => prev.filter((f) => f.id !== friendId));
-        setActionMessage({
-          type: 'success',
-          text: `${friendName} was removed from contacts.`,
-        });
+        setActionMessage({ type: 'success', text: `${friendName} was removed.` });
       }
-    } catch (err) {
-      console.error('Remove friend error:', err);
+    } catch {
+      setActionMessage({ type: 'error', text: 'Failed to remove friend' });
     }
   };
 
-  const copyMyEmail = () => {
-    if (currentUser?.email) {
-      navigator.clipboard.writeText(currentUser.email).catch(() => {});
-      setCopiedEmail(true);
-      setTimeout(() => setCopiedEmail(false), 2000);
+  // 10. Update Profile Action
+  const handleUpdateProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    setIsUpdatingProfile(true);
+    setActionMessage(null);
+    try {
+      const res = await fetch('/api/proxy/auth/profile', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: profileName.trim(),
+          bio: profileBio.trim(),
+          country: profileCountry,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.message || 'Failed to update profile');
+      setCurrentUser(data);
+      setActionMessage({ type: 'success', text: 'Profile updated successfully!' });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Error updating profile' });
+    } finally {
+      setIsUpdatingProfile(false);
     }
   };
 
+  // 11. Change Password Action
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    if (newPassword !== confirmPassword) {
+      setActionMessage({ type: 'error', text: 'New passwords do not match' });
+      return;
+    }
+    if (newPassword.length < 6) {
+      setActionMessage({ type: 'error', text: 'New password must be at least 6 characters' });
+      return;
+    }
+
+    setIsChangingPassword(true);
+    setActionMessage(null);
+    try {
+      const res = await fetch('/api/proxy/auth/password', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          currentPassword,
+          newPassword,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.message || 'Failed to change password');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setActionMessage({ type: 'success', text: 'Password changed successfully!' });
+    } catch (err: any) {
+      setActionMessage({ type: 'error', text: err.message || 'Error changing password' });
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
+  // Filtered Friends List
   const filteredFriends = useMemo(() => {
-    if (!searchQuery.trim()) return friends;
-    const q = searchQuery.toLowerCase();
-    return friends.filter(
-      (f) =>
-        f.name.toLowerCase().includes(q) || f.email.toLowerCase().includes(q),
-    );
-  }, [friends, searchQuery]);
+    return friends.filter((f) => {
+      const matchSearch =
+        f.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        f.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (f.bio && f.bio.toLowerCase().includes(searchQuery.toLowerCase()));
 
+      if (!matchSearch) return false;
+      if (friendsFilter === 'online') return Boolean(f.isOnline);
+      return true;
+    });
+  }, [friends, searchQuery, friendsFilter]);
+
+  const copyUserId = () => {
+    if (!currentUser) return;
+    navigator.clipboard.writeText(currentUser.id);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
+  };
+
+  // Loading Screen
   if (isAuthLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-black text-white">
-        <div className="flex flex-col items-center gap-4">
-          <div className="relative flex h-20 w-20 items-center justify-center rounded-2xl overflow-hidden border border-white/20 shadow-2xl ring-4 ring-blue-500/20">
-            <Image
-              src="/logo.png"
-              alt="China Bangladesh Connect"
-              width={80}
-              height={80}
-              className="h-full w-full object-cover"
-              priority
-            />
-            <div className="absolute inset-0 rounded-2xl border-2 border-blue-500 border-t-transparent animate-spin pointer-events-none" />
-          </div>
-          <p className="text-xs font-medium text-white/50 font-mono animate-pulse">
-            Connecting to Hong Kong Hub...
-          </p>
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white">
+        <div className="relative h-20 w-20 mb-4 animate-pulse rounded-2xl overflow-hidden border border-white/20">
+          <Image src="/logo.png" alt="CN-BD Connect" fill className="object-cover" priority />
         </div>
+        <p className="text-white/60 text-xs font-mono tracking-wider animate-pulse">
+          INITIALIZING CN-BD SECURE CHANNEL...
+        </p>
       </div>
     );
   }
 
-  // --- AUTH SCREEN (iOS 26 Liquid Water-Morphism) ---
+  // --- AUTH SCREEN (OLED Black + iOS 26 Liquid Water-Morphism) ---
   if (!currentUser) {
     return (
-      <div className="relative flex min-h-screen flex-col items-center justify-center bg-black p-4 text-white overflow-hidden pt-safe pb-safe">
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 relative overflow-hidden selection:bg-blue-600 selection:text-white">
         <div className="absolute top-1/4 -left-20 h-96 w-96 rounded-full bg-blue-600/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-1/4 -right-20 h-96 w-96 rounded-full bg-emerald-600/15 blur-3xl pointer-events-none" />
 
-        <div className="relative w-full max-w-md rounded-3xl border border-white/15 bg-white/[0.04] p-8 shadow-[0_20px_60px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-3xl">
-          {/* Header with High-Resolution Logo */}
-          <div className="mb-6 text-center">
-            <div className="relative mx-auto mb-4 h-28 w-28 overflow-hidden rounded-3xl border border-white/25 shadow-2xl ring-4 ring-blue-500/20 group">
-              <Image
-                src="/logo.png"
-                alt="China Bangladesh Connect Logo"
-                width={112}
-                height={112}
-                className="h-full w-full object-cover transition-transform group-hover:scale-105 duration-300"
-                priority
-              />
+        <div className="w-full max-w-md relative z-10 rounded-3xl border border-white/15 bg-black/60 p-8 shadow-[0_20px_60px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-3xl animate-in fade-in zoom-in-95 duration-300">
+          <div className="text-center mb-8">
+            <div className="relative mx-auto mb-4 flex h-24 w-24 items-center justify-center rounded-2xl overflow-hidden border border-white/25 shadow-2xl ring-4 ring-blue-500/20">
+              <Image src="/logo.png" alt="CN-BD Connect" width={96} height={96} className="h-full w-full object-cover" priority />
             </div>
-            <h1 className="text-2xl font-bold tracking-tight text-white">
-              China Bangladesh Connect
+            <h1 className="text-2xl font-bold tracking-tight text-white mb-1">
+              CN-BD Connect
             </h1>
-            <p className="mt-1 text-xs text-blue-400 font-medium">
-              Communication App · Made by Shah Md. Mahi
+            <p className="text-xs text-white/60">
+              Ultra Low-Latency Cross-Border Telecommunication
             </p>
-            <p className="mt-1 text-[11px] text-white/50">
-              Dedicated ultra-low latency calling between China & Bangladesh via Hong Kong
-            </p>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <Badge variant="outline" className="border-blue-500/40 bg-blue-500/10 text-blue-400 text-[10px]">
+                Dhaka ⇄ Hong Kong ⇄ China
+              </Badge>
+              <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-400 text-[10px]">
+                Dedicated WebRTC Mesh
+              </Badge>
+            </div>
           </div>
 
           {authError && (
-            <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-3.5 text-center text-xs text-red-400 animate-in fade-in">
-              {authError}
+            <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2">
+              <X className="h-4 w-4 shrink-0" />
+              <span>{authError}</span>
             </div>
           )}
 
@@ -669,45 +732,41 @@ export default function App() {
             {isRegister && (
               <>
                 <div>
-                  <label className="mb-1.5 block text-xs font-medium text-white/70">
-                    Full Name
-                  </label>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Full Name</label>
                   <Input
                     type="text"
                     required
-                    placeholder="e.g. Li Wei or Shah Mahi"
+                    placeholder="Shah Md. Mahi"
                     value={authName}
                     onChange={(e) => setAuthName(e.target.value)}
-                    className="h-11 bg-black/60 border-white/15 text-white rounded-xl focus:border-blue-500/60"
+                    className="h-11 bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-blue-500/50"
                   />
                 </div>
 
                 <div>
-                  <label className="mb-1.5 block text-xs font-medium text-white/70">
-                    Your Location / Gateway Region
-                  </label>
-                  <div className="grid grid-cols-2 gap-3">
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Location / Hub Region</label>
+                  <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       onClick={() => setAuthCountry('BD')}
-                      className={`flex items-center justify-center gap-2 rounded-xl border p-3 text-xs font-semibold transition-all ${
+                      className={`h-11 rounded-xl border text-xs font-medium flex items-center justify-center gap-2 transition-all ${
                         authCountry === 'BD'
-                          ? 'border-emerald-500/60 bg-emerald-500/20 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.2)]'
-                          : 'border-white/10 bg-black/40 text-white/50 hover:bg-white/5'
+                          ? 'border-emerald-500 bg-emerald-500/20 text-white shadow-[0_0_15px_rgba(16,185,129,0.3)]'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
                       }`}
                     >
-                      <span className="text-base">🇧🇩</span> Bangladesh
+                      <span>🇧🇩</span> Bangladesh
                     </button>
                     <button
                       type="button"
                       onClick={() => setAuthCountry('CN')}
-                      className={`flex items-center justify-center gap-2 rounded-xl border p-3 text-xs font-semibold transition-all ${
+                      className={`h-11 rounded-xl border text-xs font-medium flex items-center justify-center gap-2 transition-all ${
                         authCountry === 'CN'
-                          ? 'border-red-500/60 bg-red-500/20 text-red-300 shadow-[0_0_20px_rgba(239,68,68,0.2)]'
-                          : 'border-white/10 bg-black/40 text-white/50 hover:bg-white/5'
+                          ? 'border-red-500 bg-red-500/20 text-white shadow-[0_0_15px_rgba(239,68,68,0.3)]'
+                          : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10'
                       }`}
                     >
-                      <span className="text-base">🇨🇳</span> China
+                      <span>🇨🇳</span> China
                     </button>
                   </div>
                 </div>
@@ -715,30 +774,26 @@ export default function App() {
             )}
 
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-white/70">
-                Email Address
-              </label>
+              <label className="text-xs font-medium text-white/70 mb-1.5 block">Email Address</label>
               <Input
                 type="email"
                 required
-                placeholder="name@example.com"
+                placeholder="user@example.com"
                 value={authEmail}
                 onChange={(e) => setAuthEmail(e.target.value)}
-                className="h-11 bg-black/60 border-white/15 text-white rounded-xl focus:border-blue-500/60"
+                className="h-11 bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-blue-500/50"
               />
             </div>
 
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-white/70">
-                Password
-              </label>
+              <label className="text-xs font-medium text-white/70 mb-1.5 block">Password</label>
               <Input
                 type="password"
                 required
                 placeholder="••••••••"
                 value={authPassword}
                 onChange={(e) => setAuthPassword(e.target.value)}
-                className="h-11 bg-black/60 border-white/15 text-white rounded-xl focus:border-blue-500/60"
+                className="h-11 bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-blue-500/50"
               />
             </div>
 
@@ -750,7 +805,7 @@ export default function App() {
               {authSubmitting ? (
                 <span className="flex items-center gap-2">
                   <RefreshCw className="h-4 w-4 animate-spin" />
-                  Processing...
+                  Connecting...
                 </span>
               ) : isRegister ? (
                 'Create Account'
@@ -761,7 +816,7 @@ export default function App() {
           </form>
 
           <div className="mt-6 text-center text-xs text-white/50">
-            {isRegister ? 'Already have an account?' : "Don't have an account?"}{' '}
+            {isRegister ? 'Already registered?' : "Don't have an account?"}{' '}
             <button
               onClick={() => {
                 setIsRegister(!isRegister);
@@ -777,9 +832,9 @@ export default function App() {
     );
   }
 
-  // --- DASHBOARD SCREEN (OLED Black + iOS 26 Liquid Water-Morphism) ---
+  // --- MAIN DASHBOARD SCREEN (OLED Black + iOS 26 Liquid Water-Morphism) ---
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col selection:bg-blue-600 selection:text-white">
+    <div className="min-h-screen bg-black text-white flex flex-col selection:bg-blue-600 selection:text-white pb-24 md:pb-8">
       {/* Active Call Fullscreen Overlay */}
       <CallScreen
         callState={webrtc.callState}
@@ -795,578 +850,858 @@ export default function App() {
         isPeerVideoOff={webrtc.isPeerVideoOff}
         onAnswer={webrtc.answerCall}
         onReject={webrtc.rejectCall}
-        onEnd={webrtc.endCall}
+        onEnd={webrtc.callState === 'calling' ? webrtc.cancelCall : webrtc.endCall}
         onToggleMute={webrtc.toggleMute}
         onToggleVideo={webrtc.toggleVideo}
         onSwitchCamera={webrtc.switchCamera}
         onToggleScreenShare={webrtc.toggleScreenShare}
       />
 
-      {/* Sticky Header with Logo & Liquid Water-Morphism */}
-      <header className="sticky top-0 z-20 border-b border-white/10 bg-black/70 backdrop-blur-2xl px-4 py-3 pt-safe">
-        <div className="mx-auto flex max-w-5xl items-center justify-between">
-          {/* Logo & Hub status */}
+      {/* Floating Action Banner Notification Toast */}
+      {actionMessage && (
+        <div
+          className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl border text-xs font-medium shadow-2xl backdrop-blur-2xl animate-in slide-in-from-top-4 duration-300 ${
+            actionMessage.type === 'success'
+              ? 'border-emerald-500/40 bg-emerald-950/80 text-emerald-200'
+              : 'border-red-500/40 bg-red-950/80 text-red-200'
+          }`}
+        >
+          {actionMessage.type === 'success' ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+          ) : (
+            <X className="h-4 w-4 text-red-400 shrink-0" />
+          )}
+          <span>{actionMessage.text}</span>
+          <button onClick={() => setActionMessage(null)} className="ml-2 hover:opacity-75">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Header: Brand & Live Latency Indicator */}
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-black/80 backdrop-blur-2xl">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/20 shadow-lg ring-2 ring-blue-500/20 shrink-0">
-              <Image
-                src="/logo.png"
-                alt="China Bangladesh Connect"
-                width={44}
-                height={44}
-                className="h-full w-full object-cover"
-                priority
-              />
+            <div className="relative h-10 w-10 rounded-xl overflow-hidden border border-white/20 shadow-md">
+              <Image src="/logo.png" alt="Logo" fill className="object-cover" priority />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold leading-tight tracking-tight text-white">
-                  CN-BD Connect
-                </h1>
-                <Badge variant="outline" className="hidden sm:inline-flex text-[10px] py-0 px-2 border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
-                  Native PWA
-                </Badge>
+                <span className="font-bold tracking-tight text-white text-base">CN-BD Connect</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono">
+                  v2.6
+                </span>
               </div>
-              <div className="flex items-center gap-1.5 text-xs text-white/50 mt-0.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-mono text-[11px]">Hong Kong Hub: 18.166.1.216</span>
-              </div>
+              <p className="text-[11px] text-white/50">Dedicated Telecommunication Hub</p>
             </div>
           </div>
 
-          {/* User Profile Info & Actions */}
-          <div className="flex items-center gap-2">
-            {/* User chip with quick copy */}
-            <div
-              onClick={copyMyEmail}
-              className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1.5 cursor-pointer hover:bg-white/10 transition-colors shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)]"
-              title="Click to copy your email to share with friends"
+          {/* Desktop Navigation Tabs */}
+          <div className="hidden md:flex items-center gap-1 bg-white/5 p-1 rounded-2xl border border-white/10">
+            <button
+              onClick={() => setActiveTab('friends')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                activeTab === 'friends'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-white/70 hover:text-white hover:bg-white/5'
+              }`}
             >
-              <span className="text-base">
-                {currentUser.country === 'BD' ? '🇧🇩' : '🇨🇳'}
-              </span>
-              <div className="text-left hidden md:block">
-                <span className="text-xs font-semibold text-white block leading-tight">
-                  {currentUser.name}
+              <Users className="h-3.5 w-3.5" />
+              Friends
+              {incomingRequests.length > 0 && (
+                <span className="h-4 w-4 rounded-full bg-red-500 text-white text-[10px] flex items-center justify-center font-bold">
+                  {incomingRequests.length}
                 </span>
-                <span className="text-[10px] font-mono text-white/50 block leading-tight">
-                  {currentUser.email}
-                </span>
-              </div>
-              <span className="text-white/50 hover:text-white">
-                {copiedEmail ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                ) : (
-                  <Copy className="h-3.5 w-3.5" />
-                )}
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab('telemetry')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                activeTab === 'telemetry'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-white/70 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Activity className="h-3.5 w-3.5" />
+              Telemetry
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                activeTab === 'settings'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-white/70 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <SettingsIcon className="h-3.5 w-3.5" />
+              Settings
+            </button>
+            <button
+              onClick={() => setActiveTab('profile')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                activeTab === 'profile'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-white/70 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <UserIcon className="h-3.5 w-3.5" />
+              Profile
+            </button>
+          </div>
+
+          {/* User Status Card & Live Latency */}
+          <div className="flex items-center gap-2">
+            <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-xl bg-white/5 border border-white/10 font-mono text-xs">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-white/60">HK Hub:</span>
+              <span className="text-emerald-400 font-bold">
+                {liveRttMs !== null ? `${liveRttMs}ms` : 'Measuring...'}
               </span>
             </div>
 
-            {/* Refresh */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={loadDashboardData}
-              disabled={isRefreshing}
-              className="h-9 w-9 p-0 rounded-full text-white/60 hover:text-white hover:bg-white/10"
-              title="Refresh friends and requests"
+            <button
+              onClick={() => setActiveTab('profile')}
+              className="flex items-center gap-2 px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs transition-colors"
             >
-              <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-            </Button>
-
-            {/* Logout */}
-            <Button
-              variant="outline"
-              size="sm"
+              <span className="font-semibold text-white">{currentUser.name}</span>
+              <span className="text-sm">{currentUser.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
+            </button>
+            <button
               onClick={handleLogout}
-              className="h-9 px-3 rounded-full border-white/15 bg-white/[0.04] text-white/70 hover:text-red-400 hover:border-red-500/30 text-xs gap-1.5"
+              className="h-8 w-8 rounded-xl bg-white/5 hover:bg-red-500/20 text-white/70 hover:text-red-400 border border-white/10 flex items-center justify-center transition-colors"
+              title="Sign Out"
             >
               <LogOut className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Logout</span>
-            </Button>
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="mx-auto w-full max-w-5xl flex-1 p-4 sm:p-6 space-y-6 pb-28 md:pb-8">
-        {/* Feedback Alert Toast */}
-        {actionMessage && (
-          <div
-            className={`flex items-center justify-between rounded-2xl border p-4 text-xs font-semibold shadow-lg backdrop-blur-2xl animate-in fade-in slide-in-from-top-2 ${
-              actionMessage.type === 'success'
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                : 'border-red-500/30 bg-red-500/10 text-red-300'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-base">{actionMessage.type === 'success' ? '✓' : '⚠'}</span>
-              <span>{actionMessage.text}</span>
+      {/* Main Content Container */}
+      <main className="max-w-6xl mx-auto px-4 py-6 flex-1 w-full space-y-6">
+        {/* --- TAB 1: FRIENDS & CALLING --- */}
+        {activeTab === 'friends' && (
+          <div className="space-y-6">
+            {/* Quick Add Friend Card */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-5 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <UserPlus className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-bold text-white">Add Contact / Friend</h3>
+                </div>
+                <span className="text-[11px] text-white/50">Cross-Border Directory</span>
+              </div>
+              <form onSubmit={handleSendFriendRequest} className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40" />
+                  <Input
+                    type="email"
+                    required
+                    placeholder="Enter friend's email address..."
+                    value={targetEmail}
+                    onChange={(e) => setTargetEmail(e.target.value)}
+                    className="h-11 pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  disabled={isSendingRequest || !targetEmail.trim()}
+                  className="h-11 px-5 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl border border-white/20 active:scale-95 transition-all shadow-md shrink-0"
+                >
+                  {isSendingRequest ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <Send className="h-3.5 w-3.5" />
+                      Add
+                    </span>
+                  )}
+                </Button>
+              </form>
             </div>
-            <button
-              onClick={() => setActionMessage(null)}
-              className="text-white/50 hover:text-white p-1"
-            >
-              <X className="h-4 w-4" />
-            </button>
+
+            {/* Friend Filter & Search Bar */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+              {/* Filter Pills */}
+              <div className="flex items-center gap-1 bg-white/5 p-1 rounded-2xl border border-white/10 w-full sm:w-auto">
+                <button
+                  onClick={() => setFriendsFilter('all')}
+                  className={`flex-1 sm:flex-none px-3 py-1 rounded-xl text-xs font-semibold transition-all ${
+                    friendsFilter === 'all'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-white/60 hover:text-white'
+                  }`}
+                >
+                  All Friends ({friends.length})
+                </button>
+                <button
+                  onClick={() => setFriendsFilter('online')}
+                  className={`flex-1 sm:flex-none px-3 py-1 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                    friendsFilter === 'online'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-white/60 hover:text-white'
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Online ({friends.filter((f) => f.isOnline).length})
+                </button>
+                <button
+                  onClick={() => setFriendsFilter('requests')}
+                  className={`flex-1 sm:flex-none px-3 py-1 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+                    friendsFilter === 'requests'
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'text-white/60 hover:text-white'
+                  }`}
+                >
+                  Requests
+                  {incomingRequests.length > 0 && (
+                    <span className="h-4 w-4 rounded-full bg-red-500 text-white text-[10px] flex items-center justify-center font-bold">
+                      {incomingRequests.length}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Instant Search Bar */}
+              <div className="relative w-full sm:w-64">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
+                <Input
+                  type="text"
+                  placeholder="Search contacts..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-9 pl-9 text-xs bg-white/5 border-white/10 text-white placeholder:text-white/30 rounded-xl"
+                />
+              </div>
+            </div>
+
+            {/* Incoming & Outgoing Requests Section (When filter is 'requests' or requests exist) */}
+            {(friendsFilter === 'requests' || incomingRequests.length > 0) && (
+              <div className="space-y-4">
+                {incomingRequests.length > 0 && (
+                  <div className="rounded-3xl border border-blue-500/30 bg-blue-950/20 p-5 backdrop-blur-3xl">
+                    <h4 className="text-xs font-bold text-blue-300 uppercase tracking-wider mb-3 flex items-center gap-2">
+                      <UserCheck className="h-4 w-4" />
+                      Pending Incoming Requests ({incomingRequests.length})
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {incomingRequests.map((req) => (
+                        <div
+                          key={req.id}
+                          className="flex items-center justify-between p-3.5 rounded-2xl bg-black/60 border border-white/10 shadow-sm"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="h-10 w-10 rounded-xl bg-blue-600/20 text-blue-400 font-bold flex items-center justify-center text-sm border border-blue-500/30">
+                              {req.sender.name.charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-semibold text-white text-xs">{req.sender.name}</span>
+                                <span>{req.sender.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
+                              </div>
+                              <p className="text-[11px] text-white/50 font-mono">{req.sender.email}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleAcceptRequest(req.id)}
+                              className="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium flex items-center gap-1 transition-all"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              Accept
+                            </button>
+                            <button
+                              onClick={() => handleRejectRequest(req.id)}
+                              className="h-8 w-8 rounded-lg bg-red-600/30 hover:bg-red-600 text-red-200 text-xs font-medium flex items-center justify-center transition-all"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {outgoingRequests.length > 0 && friendsFilter === 'requests' && (
+                  <div className="rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur-3xl">
+                    <h4 className="text-xs font-bold text-white/70 uppercase tracking-wider mb-3">
+                      Outgoing Sent Requests ({outgoingRequests.length})
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {outgoingRequests.map((req) => (
+                        <div
+                          key={req.id}
+                          className="flex items-center justify-between p-3.5 rounded-2xl bg-black/40 border border-white/10"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="h-10 w-10 rounded-xl bg-white/10 text-white/60 font-bold flex items-center justify-center text-sm border border-white/10">
+                              {req.receiver.name.charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-semibold text-white text-xs">{req.receiver.name}</span>
+                                <span>{req.receiver.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
+                              </div>
+                              <p className="text-[11px] text-white/50 font-mono">{req.receiver.email}</p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleCancelRequest(req.id)}
+                            className="h-8 px-2.5 rounded-lg bg-white/10 hover:bg-red-500/20 text-white/60 hover:text-red-300 text-xs transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Friends Directory Grid */}
+            {friendsFilter !== 'requests' && (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-xs font-bold text-white/60 uppercase tracking-wider">
+                    {friendsFilter === 'online' ? 'Active Peers Online' : 'Contacts Directory'} (
+                    {filteredFriends.length})
+                  </h4>
+                  <button
+                    onClick={loadDashboardData}
+                    disabled={isRefreshing}
+                    className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+
+                {filteredFriends.length === 0 ? (
+                  <div className="rounded-3xl border border-white/10 bg-black/40 p-10 text-center backdrop-blur-2xl">
+                    <Users className="mx-auto h-10 w-10 text-white/20 mb-3" />
+                    <p className="text-sm font-semibold text-white/70 mb-1">
+                      {searchQuery
+                        ? 'No friends found matching search'
+                        : friendsFilter === 'online'
+                          ? 'No friends currently online'
+                          : 'No friends added yet'}
+                    </p>
+                    <p className="text-xs text-white/40 max-w-sm mx-auto">
+                      Use the search box above to send a friend request to your team members in Bangladesh or China.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filteredFriends.map((friend) => (
+                      <div
+                        key={friend.id}
+                        className="relative rounded-3xl border border-white/10 bg-black/60 p-4 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl hover:border-white/25 transition-all group"
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className="relative">
+                              <div className="h-12 w-12 rounded-2xl bg-gradient-to-br from-blue-600/30 to-purple-600/30 text-white font-bold text-base flex items-center justify-center border border-white/20 shadow-md">
+                                {friend.name.charAt(0).toUpperCase()}
+                              </div>
+                              <span
+                                className={`absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full border-2 border-black ${
+                                  friend.isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-white/30'
+                                }`}
+                              />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5">
+                                <h4 className="font-bold text-white text-sm">{friend.name}</h4>
+                                <span className="text-sm">{friend.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
+                              </div>
+                              <p className="text-[11px] text-white/50 font-mono truncate max-w-[150px]">
+                                {friend.email}
+                              </p>
+                              {friend.bio && (
+                                <p className="text-[10px] text-blue-300/80 italic mt-0.5">{friend.bio}</p>
+                              )}
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleRemoveFriend(friend.id, friend.name)}
+                            className="opacity-0 group-hover:opacity-100 text-white/30 hover:text-red-400 p-1 transition-opacity"
+                            title="Remove Contact"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+
+                        {/* Call Action Buttons */}
+                        <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-white/10">
+                          <Button
+                            onClick={() => webrtc.startCall(friend, true)}
+                            className="h-10 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-[0_4px_15px_rgba(59,130,246,0.3)] border border-white/20 active:scale-95 transition-all"
+                          >
+                            <Video className="h-3.5 w-3.5" />
+                            Video (HD)
+                          </Button>
+                          <Button
+                            onClick={() => webrtc.startCall(friend, false)}
+                            variant="outline"
+                            className="h-10 bg-white/5 hover:bg-white/10 text-white/90 font-semibold rounded-xl text-xs flex items-center justify-center gap-1.5 border-white/15 active:scale-95 transition-all"
+                          >
+                            <Phone className="h-3.5 w-3.5" />
+                            Voice Call
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Latency Route Visualizer Hero Card with Logo Emblem */}
-        <div className={`rounded-3xl border border-white/15 bg-gradient-to-r from-blue-900/20 via-white/[0.03] to-emerald-900/20 p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl ${activeTab === 'telemetry' ? 'block' : 'hidden md:block'}`}>
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3.5">
-              <div className="relative h-11 w-11 overflow-hidden rounded-xl border border-white/20 shadow shrink-0">
-                <Image
-                  src="/logo.png"
-                  alt="CN-BD Connect Emblem"
-                  width={44}
-                  height={44}
-                  className="h-full w-full object-cover"
-                />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <Globe2 className="h-4 w-4 text-blue-400" />
-                  <h3 className="text-sm font-bold text-white tracking-wide uppercase">
-                    Cross-Border Telemetry Pipeline
-                  </h3>
+        {/* --- TAB 2: TELEMETRY & NETWORK PIPELINE --- */}
+        {activeTab === 'telemetry' && (
+          <div className="space-y-6">
+            {/* Cross-Border Telemetry Banner */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Activity className="h-4 w-4 text-emerald-400" />
+                    <h3 className="text-base font-bold text-white">Cross-Border Live Telemetry</h3>
+                  </div>
+                  <p className="text-xs text-white/50">
+                    Live probe running every 3 seconds to Hong Kong Hub (ap-east-1)
+                  </p>
                 </div>
-                <p className="text-xs text-white/50 mt-0.5">
-                  Optimized route bypassing the Great Firewall via self-hosted Hong Kong Coturn relay
-                </p>
-              </div>
-            </div>
-
-            {/* Live Real-Time Latency Readout */}
-            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] bg-black/60 border border-white/10 px-3.5 py-2 rounded-full shadow-inner">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`h-2.5 w-2.5 rounded-full ${
-                    (liveRttMs || 0) < 65
-                      ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
-                      : (liveRttMs || 0) < 140
-                        ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]'
-                        : 'bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.8)]'
-                  } animate-pulse`}
-                />
-                <span className="text-white/50 text-[10px] uppercase tracking-wider">LIVE RTT:</span>
-                <span
-                  className={`font-bold ${
-                    (liveRttMs || 0) < 65
-                      ? 'text-emerald-400'
-                      : (liveRttMs || 0) < 140
-                        ? 'text-amber-400'
-                        : 'text-red-400'
-                  }`}
-                >
-                  {liveRttMs !== null ? `${liveRttMs} ms` : 'Measuring...'}
-                </span>
-              </div>
-              <span className="text-white/20">|</span>
-              <span className="text-emerald-400">
-                {currentUser.country === 'BD'
-                  ? `🇧🇩 Dhaka (${liveRttMs !== null ? `${liveRttMs}ms` : '~45ms'})`
-                  : '🇧🇩 Dhaka (~45ms)'}
-              </span>
-              <span className="text-white/20">⇄</span>
-              <span className="text-blue-400 font-bold">🇭🇰 HK Hub</span>
-              <span className="text-white/20">⇄</span>
-              <span className="text-red-400">
-                {currentUser.country === 'CN'
-                  ? `🇨🇳 China (${liveRttMs !== null ? `${liveRttMs}ms` : '~25ms'})`
-                  : '🇨🇳 China (~25ms)'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Background Call Notifications Card (iOS 16.4+ & Android Lock Screen) */}
-        <div className="rounded-3xl border border-white/15 bg-white/[0.03] p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-start gap-3.5">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20 shadow shrink-0">
-                {isPushSubscribed ? (
-                  <BellRing className="h-5 w-5 text-emerald-400 animate-pulse" />
-                ) : (
-                  <Bell className="h-5 w-5 text-blue-400" />
-                )}
-              </div>
-              <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-bold text-white tracking-wide">
-                    Background Call Notifications (iOS & Android)
-                  </h3>
-                  {isPushSubscribed ? (
-                    <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-[10px]">
-                      Active · Ready for Lock Screen
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-400 text-[10px]">
-                      Not Enabled
-                    </Badge>
-                  )}
+                  <div className="font-mono text-2xl font-black tracking-tight text-white flex items-center gap-2">
+                    <span>{liveRttMs !== null ? `${liveRttMs} ms` : 'Measuring...'}</span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-sans font-semibold">
+                      LIVE RTT
+                    </span>
+                  </div>
                 </div>
-                <p className="text-xs text-white/50 mt-1 max-w-xl">
-                  {isPushSubscribed
-                    ? 'Your device is registered with Apple APNs / WebPush. When someone calls you while your screen is locked or the app is closed, you will receive an instant call alert.'
-                    : 'Receive incoming video & voice calls even when your office is closed, your phone screen is locked, or CN-BD Connect is in the background.'}
-                </p>
-                <p className="text-[11px] text-white/40 mt-1">
-                  📱 <span className="font-semibold text-white/60">iPhone / iPad notice:</span> On iOS Safari, tap the Share button (⬆️) and select <span className="text-blue-400 font-semibold">&ldquo;Add to Home Screen&rdquo;</span> first for lock screen background notifications.
-                </p>
+              </div>
+
+              {/* Topology Path Graphic */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-center">
+                  <span className="text-2xl mb-1 block">🇧🇩</span>
+                  <h4 className="font-bold text-xs text-white">Dhaka Gateway</h4>
+                  <p className="text-[11px] text-white/40 font-mono mt-1">Direct peering to HK</p>
+                  <div className="mt-3 text-xs text-emerald-400 font-mono font-bold">~42ms RTT</div>
+                </div>
+
+                <div className="rounded-2xl border border-blue-500/30 bg-blue-950/20 p-4 text-center">
+                  <span className="text-2xl mb-1 block">🇭🇰</span>
+                  <h4 className="font-bold text-xs text-white">Hong Kong Relay Hub</h4>
+                  <p className="text-[11px] text-blue-300 font-mono mt-1">AWS Lightsail (18.166.1.216)</p>
+                  <div className="mt-3 text-xs text-blue-400 font-mono font-bold">TURN 5349 / UDP 49152-65535</div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-center">
+                  <span className="text-2xl mb-1 block">🇨🇳</span>
+                  <h4 className="font-bold text-xs text-white">China Endpoints</h4>
+                  <p className="text-[11px] text-white/40 font-mono mt-1">Shenzhen / Guangzhou / Beijing</p>
+                  <div className="mt-3 text-xs text-emerald-400 font-mono font-bold">~25ms RTT</div>
+                </div>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto">
-              {isPushSubscribed ? (
-                <Button
-                  onClick={handleTestNotification}
-                  disabled={isSendingTestPush}
+            {/* Push Notifications Card */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <BellRing className="h-5 w-5 text-purple-400" />
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Background Call Notifications</h3>
+                    <p className="text-xs text-white/50">
+                      Receive calls even when app is closed or screen is locked (iOS APNs / Android FCM)
+                    </p>
+                  </div>
+                </div>
+                <Badge
                   variant="outline"
-                  size="sm"
-                  className="rounded-xl border-white/20 bg-white/5 text-xs text-emerald-400 hover:text-white hover:bg-emerald-600/20 w-full sm:w-auto"
+                  className={
+                    isPushSubscribed
+                      ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400'
+                      : 'border-yellow-500/40 bg-yellow-500/15 text-yellow-300'
+                  }
                 >
-                  {isSendingTestPush ? (
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1.5" />
-                  ) : (
-                    <Zap className="h-3.5 w-3.5 mr-1.5" />
-                  )}
-                  Send Test Alert
-                </Button>
-              ) : (
+                  {isPushSubscribed ? 'Active & Ready' : 'Permission Needed'}
+                </Badge>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 pt-2">
                 <Button
                   onClick={handleEnableNotifications}
                   disabled={isSubscribingPush}
-                  size="sm"
-                  className="rounded-xl bg-blue-600/90 hover:bg-blue-500 text-white text-xs font-semibold shadow-[0_4px_15px_rgba(59,130,246,0.4)] border border-white/20 w-full sm:w-auto"
+                  className="flex-1 h-11 bg-purple-600 hover:bg-purple-500 text-white font-semibold rounded-xl text-xs border border-white/20 active:scale-95 transition-all shadow-md"
                 >
                   {isSubscribingPush ? (
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                    <RefreshCw className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Bell className="h-3.5 w-3.5 mr-1.5" />
-                  )}
-                  Enable Notifications
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* 1. Add Friend Card */}
-        <section className={`rounded-3xl border border-white/15 bg-white/[0.03] p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl ${activeTab === 'connect' ? 'block' : 'hidden md:block'}`}>
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <UserPlus className="h-5 w-5 text-blue-400" />
-              <h3 className="text-base font-bold text-white">
-                Connect With Friend by Email
-              </h3>
-            </div>
-            <span className="text-xs text-white/50 hidden sm:inline">
-              Your email: <span className="text-blue-400 font-mono font-semibold">{currentUser.email}</span>
-            </span>
-          </div>
-
-          <p className="text-xs text-white/50 mb-3">
-            Enter your friend&apos;s registered email address. Once they accept your invitation, you can start HD video & ultra-clear voice calls instantly.
-          </p>
-
-          <form onSubmit={handleSendRequest} className="flex flex-col sm:flex-row gap-2.5">
-            <Input
-              type="email"
-              required
-              placeholder="friend@example.com"
-              value={targetEmail}
-              onChange={(e) => setTargetEmail(e.target.value)}
-              className="flex-1 h-12 bg-black/60 border-white/15 text-white rounded-2xl px-4 focus:border-blue-500/60"
-            />
-            <Button
-              type="submit"
-              disabled={isSendingRequest}
-              className="h-12 px-6 bg-blue-600/90 hover:bg-blue-500 text-white font-semibold rounded-2xl shadow-[0_8px_25px_rgba(59,130,246,0.4),inset_0_1px_1px_rgba(255,255,255,0.3)] border border-white/20 gap-2 shrink-0 active:scale-95 transition-all"
-            >
-              {isSendingRequest ? (
-                <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>Sending...</span>
-                </>
-              ) : (
-                <>
-                  <Send className="h-4 w-4" />
-                  <span>Send Friend Request</span>
-                </>
-              )}
-            </Button>
-          </form>
-        </section>
-
-        {/* 2. Incoming Friend Requests Notification Section */}
-        {incomingRequests.length > 0 && (
-          <section className={`rounded-3xl border border-blue-500/30 bg-blue-500/10 p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl animate-in fade-in ${activeTab === 'connect' || activeTab === 'contacts' ? 'block' : 'hidden md:block'}`}>
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Radio className="h-5 w-5 text-blue-400 animate-pulse" />
-                <h3 className="text-base font-bold text-white">
-                  Incoming Friend Requests ({incomingRequests.length})
-                </h3>
-              </div>
-              <Badge variant="outline" className="border-blue-500/30 bg-blue-500/20 text-blue-300 text-xs font-semibold">
-                Action Required
-              </Badge>
-            </div>
-
-            <div className="space-y-3">
-              {incomingRequests.map((req) => (
-                <div
-                  key={req.id}
-                  className="flex items-center justify-between rounded-2xl border border-white/15 bg-black/60 p-4 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] gap-3"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow shrink-0">
-                      {req.sender?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
-                    </div>
-                    <div className="min-w-0">
-                      <h4 className="font-semibold text-sm text-white truncate">
-                        {req.sender?.name}
-                      </h4>
-                      <p className="text-xs text-white/50 font-mono truncate">{req.sender?.email}</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => handleAcceptRequest(req.id)}
-                      className="flex items-center gap-1.5 px-4 h-10 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-white font-semibold shadow-[0_4px_15px_rgba(16,185,129,0.4),inset_0_1px_1px_rgba(255,255,255,0.3)] border border-white/20 active:scale-95 transition-all text-xs"
-                    >
-                      <Check className="h-4 w-4" />
-                      <span>Accept</span>
-                    </button>
-                    <button
-                      onClick={() => handleRejectRequest(req.id)}
-                      className="h-10 w-10 flex items-center justify-center rounded-xl border border-white/15 bg-white/[0.04] text-white/50 hover:text-red-400 hover:border-red-500/30 active:scale-95 transition-all"
-                      title="Decline"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* 3. Outgoing Pending Requests Section */}
-        {outgoingRequests.length > 0 && (
-          <section className={`rounded-3xl border border-white/10 bg-white/[0.02] p-5 sm:p-6 shadow-xl backdrop-blur-2xl ${activeTab === 'connect' ? 'block' : 'hidden md:block'}`}>
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <Clock className="h-4 w-4 text-amber-400" />
-                <h3 className="text-sm font-bold text-white">
-                  Sent Requests Pending ({outgoingRequests.length})
-                </h3>
-              </div>
-              <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-300 text-[10px]">
-                Waiting for Acceptance
-              </Badge>
-            </div>
-
-            <div className="space-y-2.5">
-              {outgoingRequests.map((req) => (
-                <div
-                  key={req.id}
-                  className="flex items-center justify-between rounded-2xl border border-white/10 bg-black/40 p-3.5 text-xs"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="text-lg shrink-0">
-                      {req.receiver?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
+                    <span className="flex items-center gap-1.5">
+                      <Bell className="h-3.5 w-3.5" />
+                      {isPushSubscribed ? 'Re-sync Notifications' : 'Enable Lock-Screen Notifications'}
                     </span>
-                    <div className="min-w-0">
-                      <span className="font-semibold text-white block truncate">
-                        {req.receiver?.name || req.receiver?.email}
-                      </span>
-                      <span className="text-[11px] text-white/40 font-mono block truncate">
-                        {req.receiver?.email}
-                      </span>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => handleCancelRequest(req.id)}
-                    className="px-3 py-1.5 rounded-xl border border-white/15 bg-white/5 text-white/60 hover:text-red-400 hover:border-red-500/30 active:scale-95 transition-all text-[11px] shrink-0"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ))}
+                  )}
+                </Button>
+                <Button
+                  onClick={handleSendTestPush}
+                  disabled={isSendingTestPush}
+                  variant="outline"
+                  className="h-11 px-6 bg-white/5 hover:bg-white/10 text-white rounded-xl text-xs border border-white/15"
+                >
+                  {isSendingTestPush ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <span className="flex items-center gap-1.5">
+                      <Smartphone className="h-3.5 w-3.5" />
+                      Send Test Alert
+                    </span>
+                  )}
+                </Button>
+              </div>
             </div>
-          </section>
+          </div>
         )}
 
-        {/* 4. Contacts / Friends List */}
-        <section className={`rounded-3xl border border-white/15 bg-white/[0.03] p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl ${activeTab === 'contacts' ? 'block' : 'hidden md:block'}`}>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
-            <div className="flex items-center gap-2.5">
-              <Users className="h-5 w-5 text-emerald-400" />
-              <h3 className="text-base font-bold text-white">
-                Friends & Contacts ({friends.length})
-              </h3>
-            </div>
-
-            {/* Contact search */}
-            {friends.length > 0 && (
-              <div className="relative w-full sm:w-64">
-                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
-                <Input
-                  type="text"
-                  placeholder="Filter friends..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="h-10 pl-9 bg-black/60 border-white/15 text-xs rounded-xl text-white focus:border-emerald-500/60"
-                />
+        {/* --- TAB 3: APP SETTINGS --- */}
+        {activeTab === 'settings' && (
+          <div className="space-y-6">
+            {/* Audio & Ringtone Settings */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center gap-2 mb-4">
+                <Volume2 className="h-4 w-4 text-emerald-400" />
+                <h3 className="text-sm font-bold text-white">Audio & Ringtone Calibration</h3>
               </div>
-            )}
-          </div>
 
-          {friends.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/10 p-10 text-center text-white/50">
-              <div className="relative mx-auto mb-4 h-24 w-24 overflow-hidden rounded-2xl border border-white/15 shadow-lg opacity-80">
-                <Image
-                  src="/logo.png"
-                  alt="CN-BD Connect Logo"
-                  width={96}
-                  height={96}
-                  className="h-full w-full object-cover"
-                />
-              </div>
-              <h4 className="text-sm font-semibold text-white">No friends connected yet</h4>
-              <p className="text-xs text-white/50 mt-1 max-w-sm mx-auto">
-                Send a friend request by typing your friend&apos;s email address in the Connect tab. Once accepted, one-click HD video and voice calling will be available immediately.
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setActiveTab('connect')}
-                className="mt-4 rounded-xl border-white/20 bg-white/5 text-xs text-blue-400 hover:text-white"
-              >
-                <UserPlus className="h-3.5 w-3.5 mr-1.5" />
-                Add a Friend by Email
-              </Button>
-            </div>
-          ) : filteredFriends.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-white/50 text-xs">
-              No contacts match &ldquo;{searchQuery}&rdquo;.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {filteredFriends.map((friend) => (
-                <div
-                  key={friend.id}
-                  className="flex items-center justify-between rounded-2xl border border-white/15 bg-black/60 p-4 transition-all hover:border-white/30 hover:bg-white/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.6),inset_0_1px_1px_rgba(255,255,255,0.1)] group"
-                >
-                  {/* Friend Info */}
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow shrink-0">
-                      <span>{friend.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
-                      <span
-                        className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-black ${
-                          friend.isOnline ? 'bg-emerald-500 ring-2 ring-emerald-500/20' : 'bg-white/20'
-                        }`}
-                        title={friend.isOnline ? 'Online' : 'Offline'}
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <h4 className="font-semibold text-sm text-white leading-tight truncate">
-                          {friend.name}
-                        </h4>
-                        <Badge
-                          variant="outline"
-                          className="text-[10px] py-0 px-1.5 border-white/10 bg-white/5 text-white/60 shrink-0"
-                        >
-                          {friend.country === 'BD' ? 'Bangladesh' : 'China'}
-                        </Badge>
-                      </div>
-                      <p className="text-xs text-white/50 font-mono truncate max-w-[140px] sm:max-w-[180px] mt-0.5">
-                        {friend.email}
-                      </p>
-                    </div>
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between text-xs mb-2">
+                    <span className="text-white/70">Ringtone Volume</span>
+                    <span className="text-emerald-400 font-mono font-bold">{Math.round(ringtoneVolume * 100)}%</span>
                   </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={ringtoneVolume}
+                    onChange={(e) => setRingtoneVolume(parseFloat(e.target.value))}
+                    className="w-full accent-emerald-500 cursor-pointer"
+                  />
+                </div>
 
-                  {/* Calling Actions */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    {/* Audio Call */}
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs text-white/60">Audible Ringtone Preview</span>
+                  <Button
+                    onClick={handleTestRingtone}
+                    disabled={isTestingRingtone}
+                    className="h-9 px-4 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-xl"
+                  >
+                    {isTestingRingtone ? (
+                      <span className="flex items-center gap-1.5">
+                        <Radio className="h-3.5 w-3.5 animate-pulse" />
+                        Ringing...
+                      </span>
+                    ) : (
+                      'Test Ringtone Now'
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {/* Video Quality & Hardware Settings */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center gap-2 mb-4">
+                <SlidersHorizontal className="h-4 w-4 text-blue-400" />
+                <h3 className="text-sm font-bold text-white">Video Quality & Codec Tuning</h3>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs text-white/70 block mb-2">Resolution & Frame Rate</label>
+                  <div className="grid grid-cols-3 gap-2">
                     <button
-                      className="h-11 w-11 rounded-2xl flex items-center justify-center bg-white/10 hover:bg-white/20 text-white border border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)] active:scale-95 transition-all"
-                      onClick={() => webrtc.startCall(friend, false)}
-                      title="Start Voice Call"
+                      type="button"
+                      onClick={() => setVideoQuality('1080p')}
+                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                        videoQuality === '1080p'
+                          ? 'border-blue-500 bg-blue-600 text-white'
+                          : 'border-white/10 bg-white/5 text-white/60'
+                      }`}
                     >
-                      <Phone className="h-4 w-4" />
+                      1080p (60fps)
                     </button>
-
-                    {/* Video Call */}
                     <button
-                      className="h-11 w-11 rounded-2xl flex items-center justify-center bg-blue-600/90 hover:bg-blue-500 text-white shadow-[0_4px_15px_rgba(59,130,246,0.4),inset_0_1px_1px_rgba(255,255,255,0.3)] border border-white/20 active:scale-95 transition-all"
-                      onClick={() => webrtc.startCall(friend, true)}
-                      title="Start HD Video Call"
+                      type="button"
+                      onClick={() => setVideoQuality('720p')}
+                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                        videoQuality === '720p'
+                          ? 'border-blue-500 bg-blue-600 text-white'
+                          : 'border-white/10 bg-white/5 text-white/60'
+                      }`}
                     >
-                      <Video className="h-4 w-4" />
+                      720p (30fps)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVideoQuality('480p')}
+                      className={`h-10 rounded-xl border text-xs font-semibold transition-all ${
+                        videoQuality === '480p'
+                          ? 'border-blue-500 bg-blue-600 text-white'
+                          : 'border-white/10 bg-white/5 text-white/60'
+                      }`}
+                    >
+                      480p (Data Saver)
                     </button>
                   </div>
                 </div>
-              ))}
+
+                <div className="flex items-center justify-between pt-2 border-t border-white/10">
+                  <span className="text-xs text-white/70">Acoustic Echo Cancellation (AEC)</span>
+                  <input
+                    type="checkbox"
+                    checked={echoCancellation}
+                    onChange={(e) => setEchoCancellation(e.target.checked)}
+                    className="accent-blue-600 h-4 w-4"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between border-t border-white/10 pt-2">
+                  <span className="text-xs text-white/70">AI Noise Suppression (ANS)</span>
+                  <input
+                    type="checkbox"
+                    checked={noiseSuppression}
+                    onChange={(e) => setNoiseSuppression(e.target.checked)}
+                    className="accent-blue-600 h-4 w-4"
+                  />
+                </div>
+              </div>
             </div>
-          )}
-        </section>
+
+            {/* PWA & System Information */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-white/60">PWA Client Cache</span>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-semibold"
+                >
+                  Reload Application
+                </button>
+              </div>
+              <p className="text-[11px] text-white/40">
+                Service worker active with offline caching and background APNs/FCM push listening.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB 4: USER PROFILE & PASSWORD --- */}
+        {activeTab === 'profile' && (
+          <div className="space-y-6">
+            {/* Profile Overview Card */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-4">
+                  <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 text-white font-black text-2xl flex items-center justify-center border border-white/20 shadow-xl">
+                    {currentUser.name.charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">{currentUser.name}</h3>
+                    <p className="text-xs text-white/50 font-mono">{currentUser.email}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <Badge variant="outline" className="border-white/15 bg-white/5 text-white text-[10px]">
+                        {currentUser.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
+                      </Badge>
+                      <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-[10px]">
+                        {currentUser.bio || 'Available'}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={copyUserId}
+                  className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-white/70"
+                >
+                  {copiedId ? <CheckCheck className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedId ? 'Copied' : 'Copy ID'}</span>
+                </button>
+              </div>
+
+              {/* Edit Profile Form */}
+              <form onSubmit={handleUpdateProfile} className="space-y-4 pt-4 border-t border-white/10">
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Display Name</label>
+                  <Input
+                    type="text"
+                    required
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                    className="h-11 bg-white/5 border-white/10 text-white rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Status / Bio Message</label>
+                  <Input
+                    type="text"
+                    placeholder="e.g. Available, In Shenzhen Factory, In Dhaka Office..."
+                    value={profileBio}
+                    onChange={(e) => setProfileBio(e.target.value)}
+                    className="h-11 bg-white/5 border-white/10 text-white rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Location / Country</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setProfileCountry('BD')}
+                      className={`h-11 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
+                        profileCountry === 'BD'
+                          ? 'border-emerald-500 bg-emerald-500/20 text-white shadow-md'
+                          : 'border-white/10 bg-white/5 text-white/60'
+                      }`}
+                    >
+                      <span>🇧🇩</span> Bangladesh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setProfileCountry('CN')}
+                      className={`h-11 rounded-xl border text-xs font-semibold flex items-center justify-center gap-2 transition-all ${
+                        profileCountry === 'CN'
+                          ? 'border-red-500 bg-red-500/20 text-white shadow-md'
+                          : 'border-white/10 bg-white/5 text-white/60'
+                      }`}
+                    >
+                      <span>🇨🇳</span> China
+                    </button>
+                  </div>
+                </div>
+
+                <Button
+                  type="submit"
+                  disabled={isUpdatingProfile}
+                  className="h-11 w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-xl text-xs shadow-md border border-white/20 active:scale-95 transition-all"
+                >
+                  {isUpdatingProfile ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Save Profile Changes'}
+                </Button>
+              </form>
+            </div>
+
+            {/* Change Password Card */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex items-center gap-2 mb-4">
+                <KeyRound className="h-4 w-4 text-purple-400" />
+                <h3 className="text-sm font-bold text-white">Security & Password</h3>
+              </div>
+
+              <form onSubmit={handleChangePassword} className="space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Current Password</label>
+                  <Input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    className="h-11 bg-white/5 border-white/10 text-white rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">New Password</label>
+                  <Input
+                    type="password"
+                    required
+                    placeholder="At least 6 characters..."
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="h-11 bg-white/5 border-white/10 text-white rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-white/70 mb-1.5 block">Confirm New Password</label>
+                  <Input
+                    type="password"
+                    required
+                    placeholder="Repeat new password..."
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="h-11 bg-white/5 border-white/10 text-white rounded-xl focus:border-blue-500/50"
+                  />
+                </div>
+
+                <Button
+                  type="submit"
+                  disabled={isChangingPassword}
+                  className="h-11 w-full bg-purple-600 hover:bg-purple-500 text-white font-semibold rounded-xl text-xs shadow-md border border-white/20 active:scale-95 transition-all"
+                >
+                  {isChangingPassword ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Update Password'}
+                </Button>
+              </form>
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* Mobile Floating iOS 26 Capsule Navigation Dock */}
-      <nav className="fixed bottom-3 inset-x-0 z-20 flex justify-center pointer-events-none md:hidden pb-safe">
-        <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-white/20 bg-black/75 px-3 py-2 shadow-[0_12px_40px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl">
-          <button
-            onClick={() => setActiveTab('contacts')}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold transition-all ${
-              activeTab === 'contacts'
-                ? 'bg-white/15 text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.25)] border border-white/20'
-                : 'text-white/60 hover:text-white'
-            }`}
-          >
-            <Users className="h-3.5 w-3.5" />
-            <span>Contacts</span>
-            {friends.length > 0 && (
-              <span className="ml-0.5 text-[10px] px-1.5 py-0.2 rounded-full bg-white/20">
-                {friends.length}
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('connect')}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold transition-all relative ${
-              activeTab === 'connect'
-                ? 'bg-blue-600/80 text-white shadow-[0_0_15px_rgba(59,130,246,0.4),inset_0_1px_1px_rgba(255,255,255,0.25)] border border-white/20'
-                : 'text-white/60 hover:text-white'
-            }`}
-          >
-            <UserPlus className="h-3.5 w-3.5" />
-            <span>Connect</span>
+      {/* Mobile-First Bottom Floating Dock (Native PWA Experience) */}
+      <nav className="md:hidden fixed bottom-3 left-4 right-4 z-40 h-16 rounded-3xl bg-black/80 border border-white/20 shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl flex items-center justify-around px-2">
+        <button
+          onClick={() => setActiveTab('friends')}
+          className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${
+            activeTab === 'friends' ? 'text-blue-400 scale-105' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          <div className="relative">
+            <Users className="h-5 w-5" />
             {incomingRequests.length > 0 && (
-              <span className="ml-0.5 text-[10px] px-1.5 py-0.2 rounded-full bg-red-500 text-white font-bold animate-pulse">
-                {incomingRequests.length}
-              </span>
+              <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-black" />
             )}
-          </button>
+          </div>
+          <span className="text-[10px] font-semibold mt-1">Friends</span>
+        </button>
 
-          <button
-            onClick={() => setActiveTab('telemetry')}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold transition-all ${
-              activeTab === 'telemetry'
-                ? 'bg-emerald-600/80 text-white shadow-[0_0_15px_rgba(16,185,129,0.4),inset_0_1px_1px_rgba(255,255,255,0.25)] border border-white/20'
-                : 'text-white/60 hover:text-white'
-            }`}
-          >
-            <Activity className="h-3.5 w-3.5" />
-            <span>Telemetry</span>
-          </button>
-        </div>
+        <button
+          onClick={() => setActiveTab('telemetry')}
+          className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${
+            activeTab === 'telemetry' ? 'text-emerald-400 scale-105' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          <Activity className="h-5 w-5" />
+          <span className="text-[10px] font-semibold mt-1">Telemetry</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('settings')}
+          className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${
+            activeTab === 'settings' ? 'text-purple-400 scale-105' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          <SettingsIcon className="h-5 w-5" />
+          <span className="text-[10px] font-semibold mt-1">Settings</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('profile')}
+          className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${
+            activeTab === 'profile' ? 'text-white scale-105' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          <UserIcon className="h-5 w-5" />
+          <span className="text-[10px] font-semibold mt-1">Profile</span>
+        </button>
       </nav>
     </div>
   );

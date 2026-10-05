@@ -2,13 +2,17 @@ import {
   Body,
   Controller,
   Get,
+  Patch,
   Post,
+  Put,
   UseGuards,
   ValidationPipe,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { CurrentUser } from './decorators/current-user.decorator.js';
 import type { UserPayload } from './decorators/current-user.decorator.js';
@@ -32,4 +36,23 @@ export class AuthController {
   async getProfile(@CurrentUser() user: UserPayload) {
     return this.authService.getProfile(user.id);
   }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('profile')
+  async updateProfile(
+    @CurrentUser() user: UserPayload,
+    @Body(new ValidationPipe({ whitelist: true })) dto: UpdateProfileDto,
+  ) {
+    return this.authService.updateProfile(user.id, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Put('password')
+  async changePassword(
+    @CurrentUser() user: UserPayload,
+    @Body(new ValidationPipe({ whitelist: true })) dto: ChangePasswordDto,
+  ) {
+    return this.authService.changePassword(user.id, dto);
+  }
 }
+

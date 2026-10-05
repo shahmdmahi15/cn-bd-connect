@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -22,6 +23,22 @@ interface AuthenticatedSocket extends Socket {
     name: string;
     country: string;
   };
+}
+
+interface PendingCallSession {
+  callId: string;
+  callerId: string;
+  calleeId: string;
+  caller: {
+    id: string;
+    name: string;
+    email: string;
+    country: string;
+  };
+  isVideo: boolean;
+  offer: any;
+  createdAt: number;
+  timer: NodeJS.Timeout;
 }
 
 @WebSocketGateway({
@@ -44,6 +61,10 @@ export class SignalingGateway
   private userSockets = new Map<string, Set<string>>();
   // Active call map: userId -> currentCallWithUserId
   private activeCalls = new Map<string, string>();
+  // Pending calls waiting for answer (calleeId -> session)
+  private pendingCalls = new Map<string, PendingCallSession>();
+  // Reverse index (callerId -> calleeId)
+  private callerToPending = new Map<string, string>();
 
   constructor(
     private readonly jwtService: JwtService,
@@ -103,6 +124,18 @@ export class SignalingGateway
 
       this.logger.log(`User connected: ${payload.name} (${payload.id}) - Socket: ${client.id}`);
 
+      // Check if user has an active pending incoming call waiting for them!
+      const pending = this.pendingCalls.get(payload.id);
+      if (pending) {
+        this.logger.log(`Delivering pending call ${pending.callId} to reconnected user ${payload.id}`);
+        client.emit('call:incoming', {
+          callId: pending.callId,
+          caller: pending.caller,
+          isVideo: pending.isVideo,
+          offer: pending.offer,
+        });
+      }
+
       // Broadcast online status to friends
       await this.notifyFriendsPresence(payload.id, true);
     } catch (err) {
@@ -129,6 +162,18 @@ export class SignalingGateway
           this.server.to(`user:${peerId}`).emit('call:ended', { fromUserId: userId });
         }
 
+        // If user was a caller waiting for a pending call, clean up and notify callee
+        const pendingCalleeId = this.callerToPending.get(userId);
+        if (pendingCalleeId) {
+          const pending = this.pendingCalls.get(pendingCalleeId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingCalls.delete(pendingCalleeId);
+            this.callerToPending.delete(userId);
+            this.server.to(`user:${pendingCalleeId}`).emit('call:cancelled', { fromUserId: userId });
+          }
+        }
+
         // Update database offline status
         await this.prisma.user.update({
           where: { id: userId },
@@ -143,6 +188,23 @@ export class SignalingGateway
   }
 
   // --- WebRTC 1-on-1 Calling Events ---
+
+  @SubscribeMessage('call:check_pending')
+  handleCheckPending(@ConnectedSocket() client: AuthenticatedSocket) {
+    const userId = client.userId;
+    if (!userId) return { hasPending: false };
+    const pending = this.pendingCalls.get(userId);
+    if (pending) {
+      return {
+        hasPending: true,
+        callId: pending.callId,
+        caller: pending.caller,
+        isVideo: pending.isVideo,
+        offer: pending.offer,
+      };
+    }
+    return { hasPending: false };
+  }
 
   @SubscribeMessage('call:initiate')
   async handleCallInitiate(
@@ -159,45 +221,118 @@ export class SignalingGateway
 
     const { toUserId, isVideo, offer } = data;
 
-    // Check if callee is busy
+    // Check if callee is currently in another active call
     if (this.activeCalls.has(toUserId)) {
       client.emit('call:busy', { toUserId, message: 'User is currently on another call' });
       return;
     }
 
-    // Dispatch high-priority background Web Push Notification to callee's device (iOS APNs / Android)
-    this.notificationsService
-      .sendPushToUser(toUserId, {
-        title: `📞 Incoming ${isVideo ? 'Video' : 'Voice'} Call`,
-        body: `${client.userPayload.name} is calling you on CN-BD Connect`,
-        tag: 'incoming-call',
-        data: { url: '/', callerId },
-      })
-      .catch((err) => this.logger.warn(`Push dispatch notice: ${err.message}`));
-
-    // Check if callee has active live websocket connections
-    const calleeSockets = this.userSockets.get(toUserId);
-    if (!calleeSockets || calleeSockets.size === 0) {
-      client.emit('call:offline', {
-        toUserId,
-        message: 'User is currently offline. A background push notification was dispatched to their phone.',
-      });
+    // Check if callee already has a pending incoming call
+    if (this.pendingCalls.has(toUserId)) {
+      client.emit('call:busy', { toUserId, message: 'User is currently receiving another call' });
       return;
     }
 
-    this.logger.log(`Call initiated from ${callerId} to ${toUserId} (Video: ${isVideo})`);
+    // Clear any previous pending call initiated by this caller
+    const existingPendingCallee = this.callerToPending.get(callerId);
+    if (existingPendingCallee) {
+      const oldPending = this.pendingCalls.get(existingPendingCallee);
+      if (oldPending) {
+        clearTimeout(oldPending.timer);
+        this.pendingCalls.delete(existingPendingCallee);
+      }
+      this.callerToPending.delete(callerId);
+    }
 
-    // Emit incoming call to callee
-    this.server.to(`user:${toUserId}`).emit('call:incoming', {
-      caller: {
-        id: callerId,
-        name: client.userPayload.name,
-        email: client.userPayload.email,
-        country: client.userPayload.country,
-      },
+    const callId = randomUUID();
+    const callerInfo = {
+      id: callerId,
+      name: client.userPayload.name,
+      email: client.userPayload.email,
+      country: client.userPayload.country,
+    };
+
+    // 45-second timeout for unanswered calls
+    const timer = setTimeout(() => {
+      this.logger.log(`Call ${callId} timed out after 45s (Caller: ${callerId}, Callee: ${toUserId})`);
+      this.pendingCalls.delete(toUserId);
+      this.callerToPending.delete(callerId);
+      this.server.to(`user:${callerId}`).emit('call:timeout', { toUserId, callId });
+      this.server.to(`user:${toUserId}`).emit('call:timeout', { fromUserId: callerId, callId });
+    }, 45000);
+
+    const pendingSession: PendingCallSession = {
+      callId,
+      callerId,
+      calleeId: toUserId,
+      caller: callerInfo,
       isVideo,
       offer,
+      createdAt: Date.now(),
+      timer,
+    };
+
+    this.pendingCalls.set(toUserId, pendingSession);
+    this.callerToPending.set(callerId, toUserId);
+
+    this.logger.log(`Call initiated (${callId}) from ${callerId} to ${toUserId} (Video: ${isVideo})`);
+
+    const calleeSockets = this.userSockets.get(toUserId);
+    const isCalleeOnline = !!(calleeSockets && calleeSockets.size > 0);
+
+    // 1. Notify caller that callee is ringing (caller plays ringback tone)
+    client.emit('call:ringing', {
+      toUserId,
+      callId,
+      isCalleeOnline,
     });
+
+    // 2. If callee has active socket connection, emit call:incoming immediately
+    if (isCalleeOnline) {
+      this.server.to(`user:${toUserId}`).emit('call:incoming', {
+        callId,
+        caller: callerInfo,
+        isVideo,
+        offer,
+      });
+    }
+
+    // 3. Dispatch high-priority background Web Push Notification to callee's device (iOS APNs / Android / Desktop)
+    const callUrl = `/?incomingCall=1&callId=${callId}&callerId=${callerId}&callerName=${encodeURIComponent(client.userPayload.name)}&isVideo=${isVideo ? '1' : '0'}&country=${client.userPayload.country || 'BD'}`;
+    this.notificationsService
+      .sendPushToUser(toUserId, {
+        title: `📞 Incoming ${isVideo ? 'Video' : 'Voice'} Call`,
+        body: `${client.userPayload.name} is calling you on CN-BD Connect. Tap to answer!`,
+        tag: `call-${callId}`,
+        data: {
+          url: callUrl,
+          callId,
+          callerId,
+          callerName: client.userPayload.name,
+          isVideo,
+          country: client.userPayload.country,
+        },
+      })
+      .catch((err) => this.logger.warn(`Push dispatch notice: ${err.message}`));
+  }
+
+  @SubscribeMessage('call:cancel')
+  handleCallCancel(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { toUserId: string },
+  ) {
+    const callerId = client.userId;
+    if (!callerId) return;
+
+    const { toUserId } = data;
+    const pending = this.pendingCalls.get(toUserId);
+    if (pending && pending.callerId === callerId) {
+      clearTimeout(pending.timer);
+      this.pendingCalls.delete(toUserId);
+      this.callerToPending.delete(callerId);
+      this.logger.log(`Call cancelled by caller ${callerId} for callee ${toUserId}`);
+      this.server.to(`user:${toUserId}`).emit('call:cancelled', { fromUserId: callerId });
+    }
   }
 
   @SubscribeMessage('call:accept')
@@ -213,6 +348,14 @@ export class SignalingGateway
     if (!calleeId) return;
 
     const { toUserId, answer } = data;
+
+    // Clear pending call timer & entries
+    const pending = this.pendingCalls.get(calleeId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingCalls.delete(calleeId);
+      this.callerToPending.delete(pending.callerId);
+    }
 
     // Mark both users as active in call
     this.activeCalls.set(calleeId, toUserId);
@@ -240,6 +383,15 @@ export class SignalingGateway
     if (!calleeId) return;
 
     const { toUserId, reason } = data;
+
+    // Clear pending call timer & entries
+    const pending = this.pendingCalls.get(calleeId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingCalls.delete(calleeId);
+      this.callerToPending.delete(pending.callerId);
+    }
+
     this.logger.log(`Call rejected by ${calleeId} for ${toUserId}`);
 
     this.server.to(`user:${toUserId}`).emit('call:rejected', {
@@ -257,6 +409,22 @@ export class SignalingGateway
     if (!userId) return;
 
     const { toUserId } = data;
+
+    // Clear any pending call if caller hangs up before answer
+    const pendingAsCallee = this.pendingCalls.get(userId);
+    if (pendingAsCallee) {
+      clearTimeout(pendingAsCallee.timer);
+      this.pendingCalls.delete(userId);
+      this.callerToPending.delete(pendingAsCallee.callerId);
+    }
+    const pendingAsCaller = this.pendingCalls.get(toUserId);
+    if (pendingAsCaller && pendingAsCaller.callerId === userId) {
+      clearTimeout(pendingAsCaller.timer);
+      this.pendingCalls.delete(toUserId);
+      this.callerToPending.delete(userId);
+      this.server.to(`user:${toUserId}`).emit('call:cancelled', { fromUserId: userId });
+    }
+
     this.activeCalls.delete(userId);
     this.activeCalls.delete(toUserId);
 

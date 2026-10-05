@@ -19,111 +19,8 @@ export interface NetworkStats {
   resolution?: string;
 }
 
-// Sophisticated dual-tone audio synthesizer for incoming ringtone and outgoing ringback tone
-class RingtoneController {
-  private audioCtx: AudioContext | null = null;
-  private isPlaying = false;
-  private ringInterval: NodeJS.Timeout | null = null;
-
-  private initCtx() {
-    if (!this.audioCtx) {
-      const AudioContextClass =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext })
-          .webkitAudioContext;
-      if (AudioContextClass) {
-        this.audioCtx = new AudioContextClass();
-      }
-    }
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume().catch(() => {});
-    }
-  }
-
-  playIncomingRing() {
-    if (this.isPlaying) return;
-    this.initCtx();
-    this.isPlaying = true;
-
-    const playTone = () => {
-      if (!this.isPlaying || !this.audioCtx) return;
-      try {
-        const osc1 = this.audioCtx.createOscillator();
-        const osc2 = this.audioCtx.createOscillator();
-        const gain = this.audioCtx.createGain();
-
-        // Dual European/Asian ringtone frequencies (440Hz + 480Hz)
-        osc1.frequency.setValueAtTime(440, this.audioCtx.currentTime);
-        osc2.frequency.setValueAtTime(480, this.audioCtx.currentTime);
-
-        gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.2, this.audioCtx.currentTime + 0.05);
-        gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 1.8);
-
-        osc1.connect(gain);
-        osc2.connect(gain);
-        gain.connect(this.audioCtx.destination);
-
-        osc1.start(this.audioCtx.currentTime);
-        osc2.start(this.audioCtx.currentTime);
-        osc1.stop(this.audioCtx.currentTime + 1.8);
-        osc2.stop(this.audioCtx.currentTime + 1.8);
-
-        // Vibrate mobile device if supported
-        if (typeof navigator !== 'undefined' && navigator.vibrate) {
-          navigator.vibrate([400, 200, 400]);
-        }
-      } catch (err) {
-        console.warn('Ringtone playback error:', err);
-      }
-    };
-
-    playTone();
-    this.ringInterval = setInterval(playTone, 3000);
-  }
-
-  playOutgoingRing() {
-    if (this.isPlaying) return;
-    this.initCtx();
-    this.isPlaying = true;
-
-    const playTone = () => {
-      if (!this.isPlaying || !this.audioCtx) return;
-      try {
-        const osc = this.audioCtx.createOscillator();
-        const gain = this.audioCtx.createGain();
-
-        // 425Hz standard international ringback tone
-        osc.frequency.setValueAtTime(425, this.audioCtx.currentTime);
-
-        gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.12, this.audioCtx.currentTime + 0.05);
-        gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 1.2);
-
-        osc.connect(gain);
-        gain.connect(this.audioCtx.destination);
-
-        osc.start(this.audioCtx.currentTime);
-        osc.stop(this.audioCtx.currentTime + 1.2);
-      } catch (err) {
-        console.warn('Ringback playback error:', err);
-      }
-    };
-
-    playTone();
-    this.ringInterval = setInterval(playTone, 3500);
-  }
-
-  stop() {
-    this.isPlaying = false;
-    if (this.ringInterval) {
-      clearInterval(this.ringInterval);
-      this.ringInterval = null;
-    }
-  }
-}
-
-const ringtone = new RingtoneController();
+import { ringtoneService } from '@/lib/ringtone';
+const ringtone = ringtoneService;
 
 // Studio-grade Opus audio + Ultra-high bitrate 4.5Mbps 1080p video with H.264 prioritization
 function enhanceSdp(sdp: string): string {
@@ -1064,18 +961,37 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     };
 
     // 6. User Busy Event
-    const handleCallBusy = () => {
-      alert('Peer is currently busy on another call');
+    const handleCallBusy = (data?: { message?: string }) => {
+      alert(data?.message || 'Peer is currently busy on another call');
       resetCall();
     };
 
     // 7. User Offline Event
-    const handleCallOffline = () => {
-      alert('Peer is currently offline');
+    const handleCallOffline = (data?: { message?: string }) => {
+      alert(data?.message || 'Peer is currently unreachable');
       resetCall();
     };
 
-    // 8. Call Control event (mute/video toggle sync via WebSocket fallback)
+    // 8. Call Ringing Event (Caller plays ringback tone)
+    const handleCallRinging = () => {
+      ringtone.playOutgoingRing();
+      setCallState('calling');
+    };
+
+    // 9. Call Cancelled Event (Caller hung up before answer)
+    const handleCallCancelled = () => {
+      ringtone.stop();
+      resetCall();
+    };
+
+    // 10. Call Timeout Event (Unanswered after 45s)
+    const handleCallTimeout = () => {
+      ringtone.stop();
+      alert('No answer. Call timed out.');
+      resetCall();
+    };
+
+    // 11. Call Control event (mute/video toggle sync via WebSocket fallback)
     const handleControlMessage = (data: {
       fromUserId: string;
       type: 'mute' | 'video_off';
@@ -1090,25 +1006,63 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     };
 
     socket.on('call:incoming', handleIncomingCall);
+    socket.on('call:ringing', handleCallRinging);
     socket.on('call:accepted', handleCallAccepted);
     socket.on('call:rejected', handleCallRejected);
     socket.on('call:ended', handleCallEnded);
+    socket.on('call:cancelled', handleCallCancelled);
+    socket.on('call:timeout', handleCallTimeout);
     socket.on('call:ice_candidate', handleIceCandidate);
     socket.on('call:offline', handleCallOffline);
     socket.on('call:busy', handleCallBusy);
     socket.on('call:control', handleControlMessage);
 
+    // Auto-probe pending calls on connection
+    socket.emit('call:check_pending', (res: any) => {
+      if (res && res.hasPending && res.caller && res.offer) {
+        handleIncomingCall(res);
+      }
+    });
+
     return () => {
       socket.off('call:incoming', handleIncomingCall);
+      socket.off('call:ringing', handleCallRinging);
       socket.off('call:accepted', handleCallAccepted);
       socket.off('call:rejected', handleCallRejected);
       socket.off('call:ended', handleCallEnded);
+      socket.off('call:cancelled', handleCallCancelled);
+      socket.off('call:timeout', handleCallTimeout);
       socket.off('call:ice_candidate', handleIceCandidate);
       socket.off('call:offline', handleCallOffline);
       socket.off('call:busy', handleCallBusy);
       socket.off('call:control', handleControlMessage);
     };
   }, [currentUser, resetCall, tuneSenderParameters]);
+
+  const checkPendingCall = useCallback(() => {
+    const socket = getSocket();
+    if (socket && socket.connected) {
+      socket.emit('call:check_pending', (res: any) => {
+        if (res && res.hasPending && res.caller && res.offer) {
+          setActivePeer(res.caller);
+          setIsVideoCall(res.isVideo);
+          incomingOfferRef.current = res.offer;
+          setCallState('incoming');
+          ringtone.playIncomingRing();
+        }
+      });
+    }
+  }, []);
+
+  // Cancel outgoing call during dialing
+  const cancelCall = useCallback(() => {
+    if (activePeer) {
+      const socket = getSocket();
+      socket.emit('call:cancel', { toUserId: activePeer.id });
+      socket.emit('call:end', { toUserId: activePeer.id });
+    }
+    resetCall();
+  }, [activePeer, resetCall]);
 
   return {
     localStream,
@@ -1125,7 +1079,9 @@ export function useWebRTC(currentUser: { id: string; name: string } | null) {
     startCall,
     answerCall,
     rejectCall,
+    cancelCall,
     endCall,
+    checkPendingCall,
     toggleMute,
     toggleVideo,
     switchCamera,

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cn-bd-connect-v3';
+const CACHE_NAME = 'cn-bd-connect-v4';
 const STATIC_ASSETS = ['/', '/manifest.json', '/logo.png', '/favicon.ico'];
 
 self.addEventListener('install', (event) => {
@@ -56,13 +56,16 @@ self.addEventListener('push', (event) => {
     body: data.body || 'Incoming call...',
     icon: data.icon || '/icons/icon-192x192.png',
     badge: data.badge || '/icons/icon-72x72.png',
-    vibrate: [500, 200, 500, 200, 500, 200, 500],
+    sound: '/ringtone.mp3',
+    // Strong rhythmic incoming call vibration pattern (ringing pulse)
+    vibrate: [600, 300, 600, 300, 600, 300, 1000, 400, 1000],
     tag: data.tag || 'call-notification',
     renotify: true,
     requireInteraction: true,
     data: data.data || { url: '/' },
     actions: [
-      { action: 'open', title: 'Open & Answer' },
+      { action: 'answer', title: '📞 Answer Call' },
+      { action: 'decline', title: '❌ Decline' },
     ],
   };
 
@@ -73,19 +76,47 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
-  const urlToOpen = (event.notification.data && event.notification.data.url) || '/';
+  const notificationData = event.notification.data || {};
+  const urlToOpen = notificationData.url || '/';
+
+  if (event.action === 'decline') {
+    // Notify clients that call was declined from notification
+    event.waitUntil(
+      self.clients
+        .matchAll({ type: 'window', includeUncontrolled: true })
+        .then((windowClients) => {
+          for (const client of windowClients) {
+            client.postMessage({
+              type: 'INCOMING_CALL_DECLINED',
+              data: notificationData,
+            });
+          }
+        }),
+    );
+    return;
+  }
 
   event.waitUntil(
     self.clients
       .matchAll({ type: 'window', includeUncontrolled: true })
       .then((windowClients) => {
-        // If app tab already open, focus it
+        // If app tab already open, focus it and notify client
         for (const client of windowClients) {
-          if (client.url.includes(self.location.origin) && 'focus' in client) {
-            return client.focus();
+          if (client.url.includes(self.location.origin)) {
+            client.postMessage({
+              type: 'OPEN_INCOMING_CALL',
+              data: notificationData,
+            });
+            if ('focus' in client) {
+              client.focus();
+            }
+            if ('navigate' in client && urlToOpen !== '/') {
+              return client.navigate(urlToOpen);
+            }
+            return client;
           }
         }
-        // Otherwise open new window/PWA
+        // Otherwise open new PWA window with deep-link
         if (self.clients.openWindow) {
           return self.clients.openWindow(urlToOpen);
         }

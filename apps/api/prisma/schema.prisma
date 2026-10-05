@@ -28,6 +28,7 @@ model User {
   password         String
   country          String          @default("BD") // "BD" (Bangladesh) or "CN" (China)
   avatarUrl        String?
+  bio              String?         @default("Available")
   isOnline         Boolean         @default(false)
   lastSeen         DateTime        @default(now())
   createdAt        DateTime        @default(now())
