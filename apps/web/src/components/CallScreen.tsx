@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import Image from 'next/image';
 import {
   Phone,
   PhoneOff,
@@ -15,7 +16,6 @@ import {
   Minimize2,
   Volume2,
   VolumeX,
-  Info,
   ShieldCheck,
   Zap,
 } from 'lucide-react';
@@ -171,16 +171,21 @@ export function CallScreen({
         <div className="absolute inset-0 bg-gradient-to-tr from-blue-900/30 via-slate-950 to-emerald-950/20 pointer-events-none" />
 
         <div className="relative w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/80 p-8 text-center shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95">
-          {/* Pulsing radar avatar */}
-          <div className="relative mx-auto mb-6 flex h-28 w-28 items-center justify-center rounded-full bg-blue-500/20 text-5xl shadow-inner border border-blue-500/30">
-            <span className="relative z-10 animate-pulse">
-              {activePeer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
-            </span>
-            <div className="absolute inset-0 rounded-full border border-blue-400/40 animate-ping pointer-events-none" />
-            <div className="absolute -inset-3 rounded-full border border-blue-500/20 animate-pulse pointer-events-none" />
+          {/* Custom Logo Emblem with pulsing radar rings */}
+          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-4 ring-blue-500/30">
+            <Image
+              src="/logo.png"
+              alt="China Bangladesh Connect"
+              width={128}
+              height={128}
+              className="h-full w-full object-cover"
+              priority
+            />
+            <div className="absolute inset-0 rounded-3xl border-2 border-blue-400/40 animate-ping pointer-events-none" />
+            <div className="absolute -inset-3 rounded-3xl border border-blue-500/20 animate-pulse pointer-events-none" />
           </div>
 
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 mb-3">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 mb-3">
             <Zap className="h-3 w-3 animate-bounce" />
             Incoming {isVideoCall ? 'HD Video Call' : 'Ultra-Low Latency Audio Call'}
           </span>
@@ -239,11 +244,17 @@ export function CallScreen({
         <div className="absolute inset-0 bg-radial from-blue-900/20 via-slate-950 to-slate-950 pointer-events-none" />
 
         <div className="relative w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/80 p-8 text-center shadow-2xl backdrop-blur-xl">
-          <div className="relative mx-auto mb-6 flex h-28 w-28 items-center justify-center rounded-full bg-blue-600/20 text-5xl border border-blue-500/30">
-            <span className="animate-pulse">
-              {activePeer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
-            </span>
-            <div className="absolute inset-0 rounded-full border border-blue-400/30 animate-ping pointer-events-none" />
+          {/* Custom Logo Emblem */}
+          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-4 ring-blue-500/30">
+            <Image
+              src="/logo.png"
+              alt="China Bangladesh Connect"
+              width={128}
+              height={128}
+              className="h-full w-full object-cover"
+              priority
+            />
+            <div className="absolute inset-0 rounded-3xl border-2 border-blue-400/30 animate-ping pointer-events-none" />
           </div>
 
           <h3 className="text-xl font-bold text-white mb-1">Calling {activePeer?.name}...</h3>
@@ -306,17 +317,23 @@ export function CallScreen({
 
       {/* Top Glassmorphic HUD */}
       <div className="absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-slate-950/90 via-slate-950/40 to-transparent">
-        {/* Left: Peer identity and duration */}
+        {/* Left: Mini Emblem, Peer identity and duration */}
         <div className="flex items-center gap-3">
-          <div className="relative flex h-10 w-10 items-center justify-center rounded-full bg-slate-800/80 text-xl border border-white/10 shadow">
-            {activePeer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
-            <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-slate-900" />
+          <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/20 shadow ring-2 ring-blue-500/20 shrink-0">
+            <Image
+              src="/logo.png"
+              alt="CN-BD Connect"
+              width={44}
+              height={44}
+              className="h-full w-full object-cover"
+              priority
+            />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h4 className="font-semibold text-sm leading-tight text-white">{activePeer?.name}</h4>
               <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-slate-700 bg-slate-900/60 text-slate-300">
-                {activePeer?.country === 'BD' ? 'BD' : 'CN'}
+                {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
               </Badge>
             </div>
             <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-mono mt-0.5">
@@ -442,15 +459,29 @@ export function CallScreen({
           }`}
         />
 
-        {/* Audio-only or Camera Off Remote Placeholder */}
+        {/* Audio-only or Camera Off: Grand Emblem Display */}
         {(!isVideoCall || !hasRemoteVideoTrack) && (
           <div className="flex flex-col items-center justify-center gap-5 text-center p-6 animate-in fade-in">
-            <div className="relative flex h-36 w-36 items-center justify-center rounded-full bg-slate-900 border-2 border-slate-800 text-6xl shadow-2xl">
-              <span>{activePeer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
-              <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20 animate-pulse pointer-events-none" />
+            {/* High-res Emblem with pulsing ring */}
+            <div className="relative flex h-48 w-48 sm:h-56 sm:w-56 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-8 ring-blue-500/20">
+              <Image
+                src="/logo.png"
+                alt="China Bangladesh Connect Emblem"
+                width={224}
+                height={224}
+                className="h-full w-full object-cover"
+                priority
+              />
+              <div className="absolute inset-0 rounded-3xl border-2 border-emerald-500/40 animate-pulse pointer-events-none" />
             </div>
+
             <div>
-              <h2 className="text-2xl font-bold text-white tracking-tight">{activePeer?.name}</h2>
+              <div className="flex items-center justify-center gap-2">
+                <h2 className="text-2xl font-bold text-white tracking-tight">{activePeer?.name}</h2>
+                <Badge variant="outline" className="text-xs border-slate-700 bg-slate-900/60 text-slate-300">
+                  {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
+                </Badge>
+              </div>
               <p className="text-xs text-slate-400 font-mono mt-1">{activePeer?.email}</p>
               <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />

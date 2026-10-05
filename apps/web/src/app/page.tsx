@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import Image from 'next/image';
 import {
   Video,
   Phone,
@@ -345,9 +346,16 @@ export default function App() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
         <div className="flex flex-col items-center gap-4">
-          <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-600/20 text-3xl">
-            🇧🇩 🇨🇳
-            <div className="absolute inset-0 rounded-2xl border-2 border-blue-500 border-t-transparent animate-spin" />
+          <div className="relative flex h-20 w-20 items-center justify-center rounded-2xl overflow-hidden border border-white/20 shadow-2xl ring-4 ring-blue-500/20">
+            <Image
+              src="/logo.png"
+              alt="China Bangladesh Connect"
+              width={80}
+              height={80}
+              className="h-full w-full object-cover"
+              priority
+            />
+            <div className="absolute inset-0 rounded-2xl border-2 border-blue-500 border-t-transparent animate-spin pointer-events-none" />
           </div>
           <p className="text-sm font-medium text-slate-400 font-mono animate-pulse">
             Connecting to Hong Kong Hub...
@@ -366,15 +374,25 @@ export default function App() {
         <div className="absolute bottom-1/4 -right-20 h-96 w-96 rounded-full bg-emerald-600/15 blur-3xl pointer-events-none" />
 
         <div className="relative w-full max-w-md rounded-3xl border border-white/10 bg-slate-900/70 p-8 shadow-2xl backdrop-blur-2xl">
-          {/* Header */}
-          <div className="mb-8 text-center">
-            <div className="mx-auto mb-4 flex h-18 w-18 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600/30 to-emerald-600/20 text-4xl shadow-inner border border-white/10">
-              🇧🇩 🇨🇳
+          {/* Header with High-Resolution Logo */}
+          <div className="mb-6 text-center">
+            <div className="relative mx-auto mb-4 h-28 w-28 overflow-hidden rounded-3xl border border-white/20 shadow-2xl ring-4 ring-blue-500/20 group">
+              <Image
+                src="/logo.png"
+                alt="China Bangladesh Connect Logo"
+                width={112}
+                height={112}
+                className="h-full w-full object-cover transition-transform group-hover:scale-105 duration-300"
+                priority
+              />
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-white">
-              CN-BD Connect
+              China Bangladesh Connect
             </h1>
-            <p className="mt-1.5 text-xs text-slate-400">
+            <p className="mt-1 text-xs text-blue-400 font-medium">
+              Communication App · Made by Shah Md. Mahi
+            </p>
+            <p className="mt-1 text-[11px] text-slate-400">
               Dedicated ultra-low latency calling between China & Bangladesh via Hong Kong
             </p>
           </div>
@@ -520,13 +538,20 @@ export default function App() {
         onToggleScreenShare={webrtc.toggleScreenShare}
       />
 
-      {/* Sticky Header */}
+      {/* Sticky Header with Logo */}
       <header className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl px-4 py-3">
         <div className="mx-auto flex max-w-5xl items-center justify-between">
           {/* Logo & Hub status */}
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600/30 to-emerald-600/20 text-xl border border-white/10 shadow">
-              🇧🇩 🇨🇳
+            <div className="relative h-12 w-12 overflow-hidden rounded-2xl border border-white/20 shadow-lg ring-2 ring-blue-500/20 shrink-0">
+              <Image
+                src="/logo.png"
+                alt="China Bangladesh Connect"
+                width={48}
+                height={48}
+                className="h-full w-full object-cover"
+                priority
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -622,19 +647,30 @@ export default function App() {
           </div>
         )}
 
-        {/* Latency Route Visualizer Hero Card */}
+        {/* Latency Route Visualizer Hero Card with Logo Emblem */}
         <div className="rounded-3xl border border-white/10 bg-gradient-to-r from-blue-900/20 via-slate-900/60 to-emerald-900/20 p-5 sm:p-6 shadow-2xl backdrop-blur-xl">
           <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <Globe2 className="h-4 w-4 text-blue-400" />
-                <h3 className="text-sm font-bold text-white tracking-wide uppercase">
-                  Cross-Border Telemetry Pipeline
-                </h3>
+            <div className="flex items-center gap-3.5">
+              <div className="relative h-11 w-11 overflow-hidden rounded-xl border border-white/20 shadow shrink-0">
+                <Image
+                  src="/logo.png"
+                  alt="CN-BD Connect Emblem"
+                  width={44}
+                  height={44}
+                  className="h-full w-full object-cover"
+                />
               </div>
-              <p className="text-xs text-slate-400 mt-1">
-                Optimized route bypassing the Great Firewall via self-hosted Hong Kong Coturn relay
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <Globe2 className="h-4 w-4 text-blue-400" />
+                  <h3 className="text-sm font-bold text-white tracking-wide uppercase">
+                    Cross-Border Telemetry Pipeline
+                  </h3>
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Optimized route bypassing the Great Firewall via self-hosted Hong Kong Coturn relay
+                </p>
+              </div>
             </div>
 
             <div className="flex items-center gap-2 font-mono text-[11px] bg-slate-950/60 border border-white/10 px-3.5 py-1.5 rounded-full">
@@ -766,8 +802,14 @@ export default function App() {
 
           {friends.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-white/10 p-10 text-center text-slate-400">
-              <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-800 text-3xl">
-                👥
+              <div className="relative mx-auto mb-4 h-24 w-24 overflow-hidden rounded-2xl border border-white/10 shadow-lg opacity-80">
+                <Image
+                  src="/logo.png"
+                  alt="CN-BD Connect Logo"
+                  width={96}
+                  height={96}
+                  className="h-full w-full object-cover"
+                />
               </div>
               <h4 className="text-sm font-semibold text-white">No friends connected yet</h4>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
