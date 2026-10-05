@@ -1,0 +1,76 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+enum CallStatus {
+  INITIATED
+  CONNECTED
+  ENDED
+  MISSED
+  DECLINED
+}
+
+model User {
+  id               String          @id @default(uuid())
+  email            String          @unique
+  name             String
+  password         String
+  country          String          @default("BD") // "BD" (Bangladesh) or "CN" (China)
+  avatarUrl        String?
+  isOnline         Boolean         @default(false)
+  lastSeen         DateTime        @default(now())
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  sentRequests     FriendRequest[] @relation("SentFriendRequests")
+  receivedRequests FriendRequest[] @relation("ReceivedFriendRequests")
+
+  callsInitiated   CallSession[]   @relation("CallerSessions")
+  callsReceived    CallSession[]   @relation("CalleeSessions")
+
+  @@index([email])
+}
+
+model FriendRequest {
+  id         String              @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  sender     User                @relation("SentFriendRequests", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User                @relation("ReceivedFriendRequests", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([senderId])
+  @@index([receiverId])
+}
+
+model CallSession {
+  id              String      @id @default(uuid())
+  callerId        String
+  calleeId        String
+  status          CallStatus  @default(INITIATED)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  durationSeconds Int         @default(0)
+  createdAt       DateTime    @default(now())
+
+  caller          User        @relation("CallerSessions", fields: [callerId], references: [id], onDelete: Cascade)
+  callee          User        @relation("CalleeSessions", fields: [calleeId], references: [id], onDelete: Cascade)
+
+  @@index([callerId])
+  @@index([calleeId])
+}

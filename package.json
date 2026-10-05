@@ -1,0 +1,15 @@
+{
+  "name": "cn-bd-connect",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "pnpm --filter api start:dev",
+    "build:web": "pnpm --filter web build",
+    "build:api": "pnpm --filter api build",
+    "build": "pnpm --filter api build && pnpm --filter web build",
+    "test": "pnpm --filter api test",
+    "lint": "pnpm --filter web lint"
+  },
+  "packageManager": "pnpm@12.9.1"
+}

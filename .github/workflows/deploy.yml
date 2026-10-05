@@ -1,0 +1,98 @@
+name: Production CI/CD Deployment
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  validate:
+    name: Lint & Build Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: cd apps/api && pnpm prisma generate
+
+      - name: Build NestJS API
+        run: pnpm --filter api build
+
+      - name: Build Next.js 16 Web App
+        run: pnpm --filter web build
+
+  deploy:
+    name: Deploy to AWS Lightsail (Hong Kong)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            echo "==> Deploying CN-BD Connect to AWS Lightsail (Hong Kong)..."
+            
+            APP_DIR="/home/${{ secrets.LIGHTSAIL_USERNAME }}/cn-bd-connect"
+
+            if [ ! -d "$APP_DIR" ]; then
+              echo "==> Cloning repository for the first time..."
+              git clone https://github.com/shahmdmahi15/cn-bd-connect.git "$APP_DIR"
+            fi
+
+            cd "$APP_DIR"
+
+            echo "==> Fetching latest changes from Git..."
+            git fetch origin master
+            git reset --hard origin/master
+
+            echo "==> Ensuring required directories exist..."
+            mkdir -p infra/certbot/conf infra/certbot/www
+
+            echo "==> Building and deploying Docker containers..."
+            docker compose build --pull
+            docker compose up -d
+
+            echo "==> Running PostgreSQL database migrations via Prisma..."
+            docker compose exec -T api pnpm prisma db push --skip-generate
+
+            echo "==> Cleaning unused Docker dangling images to preserve SSD space..."
+            docker image prune -f
+
+            echo "==> Verifying service health..."
+            docker compose ps
+
+            echo "==> Deployment Successfully Completed!"

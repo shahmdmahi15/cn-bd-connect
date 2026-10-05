@@ -1,0 +1,142 @@
+services:
+  # ============================================================================
+  # 1. PostgreSQL Database
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: cn_bd_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_pass_888}
+      POSTGRES_DB: ${POSTGRES_DB:-cn_bd_connect}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-cn_bd_connect}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cn_bd_network
+
+  # ============================================================================
+  # 2. Redis In-Memory Presence & Cache
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: cn_bd_redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cn_bd_network
+
+  # ============================================================================
+  # 3. NestJS Backend API & WebSockets Signaling
+  # ============================================================================
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: cn_bd_api
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_secure_pass_888}@postgres:5432/${POSTGRES_DB:-cn_bd_connect}?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-cn_bd_connect_jwt_secret_token_999}
+      JWT_EXPIRES_IN: 30d
+      COTURN_AUTH_SECRET: ${COTURN_AUTH_SECRET:-cn-bd-connect-coturn-shared-secret-key-999}
+      COTURN_DOMAIN: cn-bd-connect-turn.dpdns.org
+      COTURN_TTL_SECONDS: 86400
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cn_bd_network
+
+  # ============================================================================
+  # 4. Next.js 16 PWA Client Application
+  # ============================================================================
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: cn_bd_web
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      INTERNAL_API_URL: http://api:3001
+      NEXT_PUBLIC_API_URL: https://cn-bd-connect-api.shahmdmahi.dpdns.org
+      NEXT_PUBLIC_SOCKET_URL: https://cn-bd-connect-api.shahmdmahi.dpdns.org
+    depends_on:
+      - api
+    networks:
+      - cn_bd_network
+
+  # ============================================================================
+  # 5. Coturn Media Relay Server (Direct Host Networking for Ultra-Low Latency)
+  # ============================================================================
+  coturn:
+    image: coturn/coturn:latest
+    container_name: cn_bd_coturn
+    restart: always
+    network_mode: host
+    volumes:
+      - ./infra/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./infra/certbot/conf:/etc/letsencrypt:ro
+      - coturn_logs:/var/log/coturn
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
+  # ============================================================================
+  # 6. Nginx Reverse Proxy with SNI Multiplexer
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: cn_bd_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/certbot/conf:/etc/letsencrypt:ro
+      - ./infra/certbot/www:/var/www/certbot:ro
+    depends_on:
+      - web
+      - api
+    networks:
+      - cn_bd_network
+
+  # ============================================================================
+  # 7. Certbot SSL Auto-Renewal Daemon
+  # ============================================================================
+  certbot:
+    image: certbot/certbot:latest
+    container_name: cn_bd_certbot
+    restart: always
+    volumes:
+      - ./infra/certbot/conf:/etc/letsencrypt
+      - ./infra/certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done;'"
+
+networks:
+  cn_bd_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  coturn_logs:
