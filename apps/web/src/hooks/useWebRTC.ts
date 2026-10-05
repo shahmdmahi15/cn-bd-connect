@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { getSocket } from '@/lib/socket';
-import { ringtone } from '@/lib/ringtone';
 
 export interface PeerUser {
   id: string;
@@ -15,127 +14,174 @@ export interface NetworkStats {
   rttMs: number;
   bitrateKbps: number;
   packetLossPercent: number;
-  relayType: string; // 'relay' (Coturn HK) | 'direct' | 'srflx'
+  relayType: string;
   frameRate?: number;
   resolution?: string;
 }
 
-export function useWebRTC(currentUser: any) {
+// Sophisticated dual-tone audio synthesizer for incoming ringtone and outgoing ringback tone
+class RingtoneController {
+  private audioCtx: AudioContext | null = null;
+  private isPlaying = false;
+  private ringInterval: NodeJS.Timeout | null = null;
+
+  private initCtx() {
+    if (!this.audioCtx) {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      if (AudioContextClass) {
+        this.audioCtx = new AudioContextClass();
+      }
+    }
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
+  }
+
+  playIncomingRing() {
+    if (this.isPlaying) return;
+    this.initCtx();
+    this.isPlaying = true;
+
+    const playTone = () => {
+      if (!this.isPlaying || !this.audioCtx) return;
+      try {
+        const osc1 = this.audioCtx.createOscillator();
+        const osc2 = this.audioCtx.createOscillator();
+        const gain = this.audioCtx.createGain();
+
+        // Dual European/Asian ringtone frequencies (440Hz + 480Hz)
+        osc1.frequency.setValueAtTime(440, this.audioCtx.currentTime);
+        osc2.frequency.setValueAtTime(480, this.audioCtx.currentTime);
+
+        gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.2, this.audioCtx.currentTime + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 1.8);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(this.audioCtx.destination);
+
+        osc1.start(this.audioCtx.currentTime);
+        osc2.start(this.audioCtx.currentTime);
+        osc1.stop(this.audioCtx.currentTime + 1.8);
+        osc2.stop(this.audioCtx.currentTime + 1.8);
+
+        // Vibrate mobile device if supported
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate([400, 200, 400]);
+        }
+      } catch (err) {
+        console.warn('Ringtone playback error:', err);
+      }
+    };
+
+    playTone();
+    this.ringInterval = setInterval(playTone, 3000);
+  }
+
+  playOutgoingRing() {
+    if (this.isPlaying) return;
+    this.initCtx();
+    this.isPlaying = true;
+
+    const playTone = () => {
+      if (!this.isPlaying || !this.audioCtx) return;
+      try {
+        const osc = this.audioCtx.createOscillator();
+        const gain = this.audioCtx.createGain();
+
+        // 425Hz standard international ringback tone
+        osc.frequency.setValueAtTime(425, this.audioCtx.currentTime);
+
+        gain.gain.setValueAtTime(0, this.audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.12, this.audioCtx.currentTime + 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + 1.2);
+
+        osc.connect(gain);
+        gain.connect(this.audioCtx.destination);
+
+        osc.start(this.audioCtx.currentTime);
+        osc.stop(this.audioCtx.currentTime + 1.2);
+      } catch (err) {
+        console.warn('Ringback playback error:', err);
+      }
+    };
+
+    playTone();
+    this.ringInterval = setInterval(playTone, 3500);
+  }
+
+  stop() {
+    this.isPlaying = false;
+    if (this.ringInterval) {
+      clearInterval(this.ringInterval);
+      this.ringInterval = null;
+    }
+  }
+}
+
+const ringtone = new RingtoneController();
+
+// Munge SDP for studio-grade Opus 128kbps with Forward Error Correction (FEC)
+function enhanceSdp(sdp: string): string {
+  // 1. Boost Opus audio parameters: 128kbps, stereo, in-band FEC for packet loss resilience
+  let enhanced = sdp.replace(
+    /(a=fmtp:\d+ .*)/g,
+    (match) => {
+      if (match.includes('opus')) {
+        return `${match};minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1`;
+      }
+      return match;
+    },
+  );
+
+  // If no fmtp line for opus yet, add it
+  const opusRtpMapRegex = /a=rtpmap:(\d+)\s+opus\/48000\/2/i;
+  const match = enhanced.match(opusRtpMapRegex);
+  if (match) {
+    const pt = match[1];
+    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=128000;cbr=1`;
+    if (!enhanced.includes(`a=fmtp:${pt}`)) {
+      enhanced = enhanced.replace(
+        opusRtpMapRegex,
+        `a=rtpmap:${pt} opus/48000/2\r\n${fmtpLine}`,
+      );
+    }
+  }
+
+  return enhanced;
+}
+
+export function useWebRTC(currentUser: { id: string; name: string } | null) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [callState, setCallState] = useState<
     'idle' | 'calling' | 'incoming' | 'connected' | 'ended'
   >('idle');
   const [activePeer, setActivePeer] = useState<PeerUser | null>(null);
-  const [isVideoCall, setIsVideoCall] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isPeerMuted, setIsPeerMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
-  const [isPeerVideoOff, setIsPeerVideoOff] = useState(false);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isVideoCall, setIsVideoCall] = useState<boolean>(true);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [isPeerMuted, setIsPeerMuted] = useState<boolean>(false);
+  const [isVideoOff, setIsVideoOff] = useState<boolean>(false);
+  const [isPeerVideoOff, setIsPeerVideoOff] = useState<boolean>(false);
+  const [isScreenSharing, setIsScreenSharing] = useState<boolean>(false);
   const [networkStats, setNetworkStats] = useState<NetworkStats | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
-  const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const incomingOfferRef = useRef<any>(null);
-  const facingModeRef = useRef<'user' | 'environment'>('user');
-  const statsIntervalRef = useRef<any>(null);
+  const pendingCandidates = useRef<any[]>([]);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const prevBytesReceivedRef = useRef<number>(0);
   const prevTimestampRef = useRef<number>(0);
+  const facingModeRef = useRef<'user' | 'environment'>('user');
 
-  // Send control message via P2P DataChannel with WebSocket signaling fallback
-  const sendControlMessage = useCallback(
-    (msg: { type: string; isMuted?: boolean; isVideoOff?: boolean }) => {
-      // 1. Primary: Direct P2P RTCDataChannel (zero latency)
-      if (
-        dataChannelRef.current &&
-        dataChannelRef.current.readyState === 'open'
-      ) {
-        try {
-          dataChannelRef.current.send(JSON.stringify(msg));
-        } catch (err) {
-          console.warn('[WebRTC DataChannel] Send failed:', err);
-        }
-      }
-
-      // 2. Fallback: WebSocket signaling server
-      if (activePeer) {
-        try {
-          const socket = getSocket();
-          socket.emit('call:control', {
-            toUserId: activePeer.id,
-            payload: msg,
-          });
-        } catch (err) {
-          console.warn('[WebRTC Socket] Send control failed:', err);
-        }
-      }
-    },
-    [activePeer],
-  );
-
-  // Stop ringtones and reset all call resources
-  const resetCall = useCallback(() => {
-    ringtone.stop();
-    if (statsIntervalRef.current) {
-      clearInterval(statsIntervalRef.current);
-      statsIntervalRef.current = null;
-    }
-
-    if (dataChannelRef.current) {
-      try {
-        dataChannelRef.current.close();
-      } catch (e) {
-        console.warn('Error closing data channel:', e);
-      }
-      dataChannelRef.current = null;
-    }
-
-    if (pcRef.current) {
-      try {
-        pcRef.current.ontrack = null;
-        pcRef.current.onicecandidate = null;
-        pcRef.current.onconnectionstatechange = null;
-        pcRef.current.oniceconnectionstatechange = null;
-        pcRef.current.ondatachannel = null;
-        pcRef.current.close();
-      } catch (e) {
-        console.warn('Error closing peer connection:', e);
-      }
-      pcRef.current = null;
-    }
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop());
-      localStreamRef.current = null;
-      setLocalStream(null);
-    }
-
-    if (remoteStreamRef.current) {
-      remoteStreamRef.current.getTracks().forEach((track) => track.stop());
-      remoteStreamRef.current = null;
-    }
-
-    pendingCandidates.current = [];
-    incomingOfferRef.current = null;
-    prevBytesReceivedRef.current = 0;
-    prevTimestampRef.current = 0;
-
-    setRemoteStream(null);
-    setCallState('idle');
-    setActivePeer(null);
-    setIsMuted(false);
-    setIsPeerMuted(false);
-    setIsVideoOff(false);
-    setIsPeerVideoOff(false);
-    setIsScreenSharing(false);
-    setNetworkStats(null);
-  }, []);
-
-  // Fetch ICE configuration (Dedicated Coturn STUN/TURN)
+  // Fetch optimal ICE configuration (Self-Hosted Coturn + Cloudflare Anycast fallback)
   const fetchIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
     try {
       const token = localStorage.getItem('token');
@@ -171,7 +217,7 @@ export function useWebRTC(currentUser: any) {
     ];
   }, []);
 
-  // Acquire local camera and microphone stream
+  // Acquire local camera and microphone stream with studio quality
   const getMediaStream = useCallback(
     async (video = true): Promise<MediaStream> => {
       if (localStreamRef.current) {
@@ -186,13 +232,15 @@ export function useWebRTC(currentUser: any) {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          channelCount: 2,
+          sampleRate: 48000,
         },
         video: video
           ? {
               facingMode: facingModeRef.current,
-              width: { ideal: 1280, max: 1920 },
-              height: { ideal: 720, max: 1080 },
-              frameRate: { ideal: 30, max: 30 },
+              width: { ideal: 1920, max: 1920 },
+              height: { ideal: 1080, max: 1080 },
+              frameRate: { ideal: 60, max: 60 },
             }
           : false,
       };
@@ -203,11 +251,17 @@ export function useWebRTC(currentUser: any) {
         setLocalStream(stream);
         return stream;
       } catch (err) {
-        console.warn('Initial getUserMedia failed, retrying with basic constraints:', err);
+        console.warn('Initial getUserMedia failed, retrying with flexible constraints:', err);
         try {
           const fallbackStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
-            video: video,
+            video: video
+              ? {
+                  facingMode: facingModeRef.current,
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                }
+              : false,
           });
           localStreamRef.current = fallbackStream;
           setLocalStream(fallbackStream);
@@ -220,6 +274,30 @@ export function useWebRTC(currentUser: any) {
     },
     [],
   );
+
+  // Apply maximum bitrates on senders for ultra-crisp video and studio audio
+  const tuneSenderParameters = useCallback(async (pc: RTCPeerConnection) => {
+    try {
+      const senders = pc.getSenders();
+      for (const sender of senders) {
+        if (!sender.track) continue;
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+        if (sender.track.kind === 'video') {
+          params.encodings[0].maxBitrate = 3500000; // 3.5 Mbps HD 1080p
+          params.encodings[0].networkPriority = 'high';
+        } else if (sender.track.kind === 'audio') {
+          params.encodings[0].maxBitrate = 128000; // 128 kbps CD audio
+          params.encodings[0].networkPriority = 'high';
+        }
+        await sender.setParameters(params).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('Tune sender parameters notice:', err);
+    }
+  }, []);
 
   // Setup live connection statistics polling
   const startStatsMonitoring = useCallback((pc: RTCPeerConnection) => {
@@ -305,6 +383,79 @@ export function useWebRTC(currentUser: any) {
     }, 1500);
   }, []);
 
+  // Broadcast control message to peer via DataChannel & WebSocket signaling fallback
+  const sendControlMessage = useCallback(
+    (msg: { type: 'mute' | 'video_off'; [key: string]: any }) => {
+      // 1. Try DataChannel
+      if (
+        dataChannelRef.current &&
+        dataChannelRef.current.readyState === 'open'
+      ) {
+        try {
+          dataChannelRef.current.send(JSON.stringify(msg));
+        } catch (e) {
+          console.warn('[WebRTC DataChannel send failed]:', e);
+        }
+      }
+
+      // 2. WebSocket signaling fallback
+      if (activePeer) {
+        try {
+          const socket = getSocket();
+          socket.emit('call:control', {
+            toUserId: activePeer.id,
+            ...msg,
+          });
+        } catch (e) {
+          console.warn('[WebRTC WebSocket sendControlMessage error]:', e);
+        }
+      }
+    },
+    [activePeer],
+  );
+
+  // Reset all call states and hardware channels
+  const resetCall = useCallback(() => {
+    ringtone.stop();
+
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
+    }
+
+    if (dataChannelRef.current) {
+      try {
+        dataChannelRef.current.close();
+      } catch {}
+      dataChannelRef.current = null;
+    }
+
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    }
+
+    remoteStreamRef.current = null;
+    incomingOfferRef.current = null;
+    pendingCandidates.current = [];
+
+    setLocalStream(null);
+    setRemoteStream(null);
+    setCallState('idle');
+    setActivePeer(null);
+    setIsMuted(false);
+    setIsPeerMuted(false);
+    setIsVideoOff(false);
+    setIsPeerVideoOff(false);
+    setIsScreenSharing(false);
+    setNetworkStats(null);
+  }, []);
+
   // Initialize RTCPeerConnection with optimal ICE parameters and DataChannel
   const createPeerConnection = useCallback(
     async (peer: PeerUser): Promise<RTCPeerConnection> => {
@@ -318,11 +469,7 @@ export function useWebRTC(currentUser: any) {
 
       pcRef.current = pc;
 
-      // Cumulative remote media stream to guarantee both audio & video tracks are bound
-      const accumulatedStream = new MediaStream();
-      remoteStreamRef.current = accumulatedStream;
-
-      // Setup negotiated DataChannel for P2P control messages
+      // Setup negotiated DataChannel for ultra-low latency P2P control messages
       try {
         const dc = pc.createDataChannel('cn-bd-control', {
           negotiated: true,
@@ -344,7 +491,7 @@ export function useWebRTC(currentUser: any) {
 
         dataChannelRef.current = dc;
       } catch (dcErr) {
-        console.warn('[WebRTC] Negotiated DataChannel error:', dcErr);
+        console.warn('[WebRTC] Negotiated DataChannel notice:', dcErr);
       }
 
       pc.ondatachannel = (event) => {
@@ -364,38 +511,39 @@ export function useWebRTC(currentUser: any) {
         };
       };
 
-      // Handle remote incoming audio & video tracks
+      // Handle remote incoming audio & video tracks (Using event.streams[0] to prevent iOS WebKit frame drop)
       pc.ontrack = (event) => {
-        console.log('[WebRTC ontrack] Track received:', event.track.kind, event.track.id);
+        console.log(
+          `[WebRTC ontrack] Track received: kind=${event.track.kind}, id=${event.track.id}, streams=${event.streams.length}`,
+        );
 
-        const currentStream = remoteStreamRef.current || new MediaStream();
-        remoteStreamRef.current = currentStream;
+        let streamToUse: MediaStream;
+        if (event.streams && event.streams[0]) {
+          // Native stream from WebRTC engine (preserves iOS Safari hardware decoding bindings)
+          streamToUse = event.streams[0];
+        } else {
+          // Fallback track aggregation
+          const currentStream = remoteStreamRef.current || new MediaStream();
+          const existing = currentStream
+            .getTracks()
+            .filter((t) => t.kind === event.track.kind);
+          existing.forEach((t) => currentStream.removeTrack(t));
+          currentStream.addTrack(event.track);
+          streamToUse = currentStream;
+        }
 
-        // Replace any existing track of same kind
-        const existingTracks = currentStream
-          .getTracks()
-          .filter((t) => t.kind === event.track.kind);
-        existingTracks.forEach((t) => currentStream.removeTrack(t));
-
-        currentStream.addTrack(event.track);
-
-        const updateState = () => {
-          if (remoteStreamRef.current) {
-            setRemoteStream(new MediaStream(remoteStreamRef.current.getTracks()));
-          }
-        };
+        remoteStreamRef.current = streamToUse;
+        setRemoteStream(streamToUse);
 
         event.track.onunmute = () => {
-          console.log(`[WebRTC track] ${event.track.kind} unmuted and active`);
-          updateState();
+          console.log(`[WebRTC track onunmute] ${event.track.kind} unmuted and actively rendering`);
+          setRemoteStream(streamToUse);
         };
 
         event.track.onended = () => {
-          console.log(`[WebRTC track] ${event.track.kind} ended`);
-          updateState();
+          console.log(`[WebRTC track onended] ${event.track.kind} ended`);
+          setRemoteStream(streamToUse);
         };
-
-        updateState();
       };
 
       // Emit discovered ICE candidates to signaling server
@@ -423,6 +571,7 @@ export function useWebRTC(currentUser: any) {
           setCallState('connected');
           ringtone.stop();
           startStatsMonitoring(pc);
+          tuneSenderParameters(pc);
         } else if (pc.connectionState === 'failed') {
           console.warn('[WebRTC] Peer connection failed, attempting ICE restart...');
           pc.restartIce();
@@ -436,7 +585,7 @@ export function useWebRTC(currentUser: any) {
 
       return pc;
     },
-    [fetchIceServers, resetCall, startStatsMonitoring],
+    [fetchIceServers, resetCall, startStatsMonitoring, tuneSenderParameters],
   );
 
   // 1. INITIATE CALL (Outbound)
@@ -454,10 +603,16 @@ export function useWebRTC(currentUser: any) {
         // Add local tracks to peer connection
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
-        // Create SDP Offer
-        const offer = await pc.createOffer({
+        // Create SDP Offer with offerToReceive constraints
+        const rawOffer = await pc.createOffer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: true,
+        });
+
+        const enhancedSdp = enhanceSdp(rawOffer.sdp || '');
+        const offer = new RTCSessionDescription({
+          type: rawOffer.type,
+          sdp: enhancedSdp,
         });
 
         await pc.setLocalDescription(offer);
@@ -514,7 +669,13 @@ export function useWebRTC(currentUser: any) {
       }
 
       // Create and set SDP Answer
-      const answer = await pc.createAnswer();
+      const rawAnswer = await pc.createAnswer();
+      const enhancedSdp = enhanceSdp(rawAnswer.sdp || '');
+      const answer = new RTCSessionDescription({
+        type: rawAnswer.type,
+        sdp: enhancedSdp,
+      });
+
       await pc.setLocalDescription(answer);
 
       const socket = getSocket();
@@ -527,12 +688,13 @@ export function useWebRTC(currentUser: any) {
       });
 
       setCallState('connected');
+      tuneSenderParameters(pc);
     } catch (err: any) {
       console.error('Failed to answer call:', err);
       alert('Could not answer call: ' + (err.message || 'Media error'));
       resetCall();
     }
-  }, [activePeer, isVideoCall, getMediaStream, createPeerConnection, resetCall]);
+  }, [activePeer, isVideoCall, getMediaStream, createPeerConnection, resetCall, tuneSenderParameters]);
 
   // 3. REJECT INCOMING CALL
   const rejectCall = useCallback(() => {
@@ -622,8 +784,8 @@ export function useWebRTC(currentUser: any) {
       const newStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: facingModeRef.current,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
         audio: false,
       });
@@ -730,6 +892,7 @@ export function useWebRTC(currentUser: any) {
           }
 
           setCallState('connected');
+          tuneSenderParameters(pcRef.current);
         } catch (err) {
           console.error('Failed to set remote description on call accepted:', err);
         }
@@ -769,27 +932,29 @@ export function useWebRTC(currentUser: any) {
       }
     };
 
-    // 6. Callee is offline or busy
-    const handleCallOffline = (data: { message: string }) => {
-      alert(data.message || 'User is currently offline');
+    // 6. User Busy Event
+    const handleCallBusy = () => {
+      alert('Peer is currently busy on another call');
       resetCall();
     };
 
-    const handleCallBusy = (data: { message: string }) => {
-      alert(data.message || 'User is on another call');
+    // 7. User Offline Event
+    const handleCallOffline = () => {
+      alert('Peer is currently offline');
       resetCall();
     };
 
-    // 7. Signaling Fallback for Remote Peer Control Messages
+    // 8. Call Control event (mute/video toggle sync via WebSocket fallback)
     const handleControlMessage = (data: {
       fromUserId: string;
-      payload: { type: string; isMuted?: boolean; isVideoOff?: boolean };
+      type: 'mute' | 'video_off';
+      isMuted?: boolean;
+      isVideoOff?: boolean;
     }) => {
-      if (!data?.payload) return;
-      if (data.payload.type === 'mute') {
-        setIsPeerMuted(Boolean(data.payload.isMuted));
-      } else if (data.payload.type === 'video_off') {
-        setIsPeerVideoOff(Boolean(data.payload.isVideoOff));
+      if (data.type === 'mute') {
+        setIsPeerMuted(Boolean(data.isMuted));
+      } else if (data.type === 'video_off') {
+        setIsPeerVideoOff(Boolean(data.isVideoOff));
       }
     };
 
@@ -812,7 +977,7 @@ export function useWebRTC(currentUser: any) {
       socket.off('call:busy', handleCallBusy);
       socket.off('call:control', handleControlMessage);
     };
-  }, [currentUser, resetCall]);
+  }, [currentUser, resetCall, tuneSenderParameters]);
 
   return {
     localStream,
