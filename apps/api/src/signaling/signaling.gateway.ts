@@ -279,16 +279,22 @@ export class SignalingGateway
 
   // --- Real-time Notifications for Friend Requests ---
 
-  sendFriendRequestNotification(receiverId: string, sender: any) {
-    this.server.to(`user:${receiverId}`).emit('friend:request_received', {
-      sender,
-    });
+  sendFriendRequestNotification(receiverId: string, request: any) {
+    this.server.to(`user:${receiverId}`).emit('friend:request', request);
+    this.server.to(`user:${receiverId}`).emit('friend:request_received', request);
   }
 
-  sendFriendAcceptedNotification(senderId: string, friend: any) {
-    this.server.to(`user:${senderId}`).emit('friend:request_accepted', {
-      friend,
-    });
+  sendFriendAcceptedNotification(targetUserId: string, friend: any) {
+    this.server.to(`user:${targetUserId}`).emit('friend:accepted', friend);
+    this.server.to(`user:${targetUserId}`).emit('friend:request_accepted', friend);
+  }
+
+  sendFriendCanceledNotification(targetUserId: string, requestId: string) {
+    this.server.to(`user:${targetUserId}`).emit('friend:canceled', { requestId });
+  }
+
+  sendFriendRejectedNotification(targetUserId: string, requestId: string) {
+    this.server.to(`user:${targetUserId}`).emit('friend:rejected', { requestId });
   }
 
   private async notifyFriendsPresence(userId: string, isOnline: boolean) {

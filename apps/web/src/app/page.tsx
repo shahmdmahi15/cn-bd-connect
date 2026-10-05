@@ -23,6 +23,10 @@ import {
   Activity,
   Compass,
   ArrowUpRight,
+  Clock,
+  Send,
+  UserCheck,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -42,6 +46,7 @@ interface User {
 interface FriendRequest {
   id: string;
   sender: User;
+  receiver: User;
   createdAt: string;
 }
 
@@ -63,8 +68,10 @@ export default function App() {
 
   // Dashboard State
   const [friends, setFriends] = useState<User[]>([]);
-  const [requests, setRequests] = useState<FriendRequest[]>([]);
+  const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
+  const [outgoingRequests, setOutgoingRequests] = useState<FriendRequest[]>([]);
   const [targetEmail, setTargetEmail] = useState('');
+  const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [actionMessage, setActionMessage] = useState<{
     type: 'success' | 'error';
@@ -121,7 +128,7 @@ export default function App() {
       const res = await fetch('/api/proxy/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: authEmail, password: authPassword }),
+        body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -153,9 +160,9 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: authEmail,
+          email: authEmail.trim(),
           password: authPassword,
-          name: authName,
+          name: authName.trim(),
           country: authCountry,
         }),
       });
@@ -206,8 +213,17 @@ export default function App() {
         setFriends(Array.isArray(friendsData) ? friendsData : []);
       }
       if (requestsRes.ok) {
-        const reqData = await requestsRes.json().catch(() => []);
-        setRequests(Array.isArray(reqData) ? reqData : []);
+        const reqData = await requestsRes.json().catch(() => null);
+        const incoming = Array.isArray(reqData)
+          ? reqData
+          : Array.isArray(reqData?.incoming)
+            ? reqData.incoming
+            : [];
+        const outgoing = Array.isArray(reqData?.outgoing)
+          ? reqData.outgoing
+          : [];
+        setIncomingRequests(incoming);
+        setOutgoingRequests(outgoing);
       }
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
@@ -240,39 +256,77 @@ export default function App() {
     };
 
     const handleFriendRequest = (request: FriendRequest) => {
-      setRequests((prev) => [request, ...prev]);
+      setIncomingRequests((prev) => [
+        request,
+        ...prev.filter((r) => r.id !== request.id),
+      ]);
       setActionMessage({
         type: 'success',
-        text: `New friend request from ${request.sender.name}!`,
+        text: `New friend request from ${request.sender?.name || 'a friend'}!`,
       });
     };
 
     const handleFriendAccepted = (newFriend: User) => {
-      setFriends((prev) => [newFriend, ...prev]);
+      setFriends((prev) => [
+        newFriend,
+        ...prev.filter((f) => f.id !== newFriend.id),
+      ]);
+      setIncomingRequests((prev) =>
+        prev.filter((r) => r.sender?.id !== newFriend.id),
+      );
+      setOutgoingRequests((prev) =>
+        prev.filter((r) => r.receiver?.id !== newFriend.id),
+      );
       setActionMessage({
         type: 'success',
-        text: `${newFriend.name} accepted your friend request!`,
+        text: `${newFriend.name} accepted your friend request! You can now call each other.`,
       });
+    };
+
+    const handleFriendCanceled = ({ requestId }: { requestId: string }) => {
+      setIncomingRequests((prev) => prev.filter((r) => r.id !== requestId));
+    };
+
+    const handleFriendRejected = ({ requestId }: { requestId: string }) => {
+      setOutgoingRequests((prev) => prev.filter((r) => r.id !== requestId));
     };
 
     socket.on('user:online', handleUserOnline);
     socket.on('user:offline', handleUserOffline);
     socket.on('friend:request', handleFriendRequest);
+    socket.on('friend:request_received', handleFriendRequest);
     socket.on('friend:accepted', handleFriendAccepted);
+    socket.on('friend:request_accepted', handleFriendAccepted);
+    socket.on('friend:canceled', handleFriendCanceled);
+    socket.on('friend:rejected', handleFriendRejected);
 
     return () => {
       socket.off('user:online', handleUserOnline);
       socket.off('user:offline', handleUserOffline);
       socket.off('friend:request', handleFriendRequest);
+      socket.off('friend:request_received', handleFriendRequest);
       socket.off('friend:accepted', handleFriendAccepted);
+      socket.off('friend:request_accepted', handleFriendAccepted);
+      socket.off('friend:canceled', handleFriendCanceled);
+      socket.off('friend:rejected', handleFriendRejected);
     };
   }, [currentUser, token]);
 
   // 4. Send Friend Request
   const handleSendRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!targetEmail.trim()) return;
+    const email = targetEmail.trim().toLowerCase();
+    if (!email) return;
 
+    if (email === currentUser?.email.toLowerCase()) {
+      setActionMessage({
+        type: 'error',
+        text: 'You cannot send a friend request to your own email.',
+      });
+      return;
+    }
+
+    setIsSendingRequest(true);
     try {
       const res = await fetch('/api/proxy/friends/request', {
         method: 'POST',
@@ -280,23 +334,26 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ email: targetEmail.trim() }),
+        body: JSON.stringify({ email }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(data?.message || 'Could not send request');
+        throw new Error(data?.message || 'Could not send friend request');
       }
 
       setActionMessage({
         type: 'success',
-        text: `Friend request dispatched to ${targetEmail}!`,
+        text: `Friend request dispatched to ${email}! Waiting for their acceptance.`,
       });
       setTargetEmail('');
+      loadDashboardData();
     } catch (err: any) {
       setActionMessage({
         type: 'error',
         text: err.message || 'Error sending friend request',
       });
+    } finally {
+      setIsSendingRequest(false);
     }
   };
 
@@ -327,10 +384,50 @@ export default function App() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
+        setIncomingRequests((prev) => prev.filter((r) => r.id !== requestId));
         loadDashboardData();
       }
     } catch (err) {
       console.error('Reject request error:', err);
+    }
+  };
+
+  // 7. Cancel Sent Request
+  const handleCancelRequest = async (requestId: string) => {
+    try {
+      const res = await fetch(`/api/proxy/friends/requests/${requestId}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setOutgoingRequests((prev) => prev.filter((r) => r.id !== requestId));
+        setActionMessage({
+          type: 'success',
+          text: 'Friend request canceled.',
+        });
+      }
+    } catch (err) {
+      console.error('Cancel request error:', err);
+    }
+  };
+
+  // 8. Remove Friend
+  const handleRemoveFriend = async (friendId: string, friendName: string) => {
+    if (!confirm(`Remove ${friendName} from your contacts?`)) return;
+    try {
+      const res = await fetch(`/api/proxy/friends/${friendId}/remove`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setFriends((prev) => prev.filter((f) => f.id !== friendId));
+        setActionMessage({
+          type: 'success',
+          text: `${friendName} was removed from contacts.`,
+        });
+      }
+    } catch (err) {
+      console.error('Remove friend error:', err);
     }
   };
 
@@ -378,7 +475,6 @@ export default function App() {
   if (!currentUser) {
     return (
       <div className="relative flex min-h-screen flex-col items-center justify-center bg-black p-4 text-white overflow-hidden pt-safe pb-safe">
-        {/* Ambient liquid lighting glow */}
         <div className="absolute top-1/4 -left-20 h-96 w-96 rounded-full bg-blue-600/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-1/4 -right-20 h-96 w-96 rounded-full bg-emerald-600/15 blur-3xl pointer-events-none" />
 
@@ -704,63 +800,77 @@ export default function App() {
               </h3>
             </div>
             <span className="text-xs text-white/50 hidden sm:inline">
-              Share your email: <span className="text-blue-400 font-mono font-semibold">{currentUser.email}</span>
+              Your email: <span className="text-blue-400 font-mono font-semibold">{currentUser.email}</span>
             </span>
           </div>
+
+          <p className="text-xs text-white/50 mb-3">
+            Enter your friend&apos;s registered email address. Once they accept your invitation, you can start HD video & ultra-clear voice calls instantly.
+          </p>
 
           <form onSubmit={handleSendRequest} className="flex flex-col sm:flex-row gap-2.5">
             <Input
               type="email"
               required
-              placeholder="Enter friend's registered email (e.g. friend@example.com)"
+              placeholder="friend@example.com"
               value={targetEmail}
               onChange={(e) => setTargetEmail(e.target.value)}
               className="flex-1 h-12 bg-black/60 border-white/15 text-white rounded-2xl px-4 focus:border-blue-500/60"
             />
             <Button
               type="submit"
+              disabled={isSendingRequest}
               className="h-12 px-6 bg-blue-600/90 hover:bg-blue-500 text-white font-semibold rounded-2xl shadow-[0_8px_25px_rgba(59,130,246,0.4),inset_0_1px_1px_rgba(255,255,255,0.3)] border border-white/20 gap-2 shrink-0 active:scale-95 transition-all"
             >
-              <UserPlus className="h-4 w-4" />
-              <span>Send Friend Request</span>
+              {isSendingRequest ? (
+                <>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  <span>Sending...</span>
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4" />
+                  <span>Send Friend Request</span>
+                </>
+              )}
             </Button>
           </form>
         </section>
 
         {/* 2. Incoming Friend Requests Notification Section */}
-        {requests.length > 0 && (
+        {incomingRequests.length > 0 && (
           <section className={`rounded-3xl border border-blue-500/30 bg-blue-500/10 p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl animate-in fade-in ${activeTab === 'connect' || activeTab === 'contacts' ? 'block' : 'hidden md:block'}`}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Radio className="h-5 w-5 text-blue-400 animate-pulse" />
                 <h3 className="text-base font-bold text-white">
-                  Incoming Friend Requests ({requests.length})
+                  Incoming Friend Requests ({incomingRequests.length})
                 </h3>
               </div>
-              <Badge variant="outline" className="border-blue-500/30 bg-blue-500/20 text-blue-300 text-xs">
-                Pending Actions
+              <Badge variant="outline" className="border-blue-500/30 bg-blue-500/20 text-blue-300 text-xs font-semibold">
+                Action Required
               </Badge>
             </div>
 
             <div className="space-y-3">
-              {requests.map((req) => (
+              {incomingRequests.map((req) => (
                 <div
                   key={req.id}
-                  className="flex items-center justify-between rounded-2xl border border-white/15 bg-black/60 p-4 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)]"
+                  className="flex items-center justify-between rounded-2xl border border-white/15 bg-black/60 p-4 shadow-[inset_0_1px_1px_rgba(255,255,255,0.1)] gap-3"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow">
-                      {req.sender.country === 'BD' ? '🇧🇩' : '🇨🇳'}
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow shrink-0">
+                      {req.sender?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
                     </div>
-                    <div>
-                      <h4 className="font-semibold text-sm text-white">
-                        {req.sender.name}
+                    <div className="min-w-0">
+                      <h4 className="font-semibold text-sm text-white truncate">
+                        {req.sender?.name}
                       </h4>
-                      <p className="text-xs text-white/50 font-mono">{req.sender.email}</p>
+                      <p className="text-xs text-white/50 font-mono truncate">{req.sender?.email}</p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={() => handleAcceptRequest(req.id)}
                       className="flex items-center gap-1.5 px-4 h-10 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 text-white font-semibold shadow-[0_4px_15px_rgba(16,185,129,0.4),inset_0_1px_1px_rgba(255,255,255,0.3)] border border-white/20 active:scale-95 transition-all text-xs"
@@ -782,7 +892,54 @@ export default function App() {
           </section>
         )}
 
-        {/* 3. Contacts / Friends List */}
+        {/* 3. Outgoing Pending Requests Section */}
+        {outgoingRequests.length > 0 && (
+          <section className={`rounded-3xl border border-white/10 bg-white/[0.02] p-5 sm:p-6 shadow-xl backdrop-blur-2xl ${activeTab === 'connect' ? 'block' : 'hidden md:block'}`}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4 text-amber-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Sent Requests Pending ({outgoingRequests.length})
+                </h3>
+              </div>
+              <Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-300 text-[10px]">
+                Waiting for Acceptance
+              </Badge>
+            </div>
+
+            <div className="space-y-2.5">
+              {outgoingRequests.map((req) => (
+                <div
+                  key={req.id}
+                  className="flex items-center justify-between rounded-2xl border border-white/10 bg-black/40 p-3.5 text-xs"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="text-lg shrink-0">
+                      {req.receiver?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
+                    </span>
+                    <div className="min-w-0">
+                      <span className="font-semibold text-white block truncate">
+                        {req.receiver?.name || req.receiver?.email}
+                      </span>
+                      <span className="text-[11px] text-white/40 font-mono block truncate">
+                        {req.receiver?.email}
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleCancelRequest(req.id)}
+                    className="px-3 py-1.5 rounded-xl border border-white/15 bg-white/5 text-white/60 hover:text-red-400 hover:border-red-500/30 active:scale-95 transition-all text-[11px] shrink-0"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* 4. Contacts / Friends List */}
         <section className={`rounded-3xl border border-white/15 bg-white/[0.03] p-5 sm:p-6 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl ${activeTab === 'contacts' ? 'block' : 'hidden md:block'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
             <div className="flex items-center gap-2.5">
@@ -820,8 +977,17 @@ export default function App() {
               </div>
               <h4 className="text-sm font-semibold text-white">No friends connected yet</h4>
               <p className="text-xs text-white/50 mt-1 max-w-sm mx-auto">
-                Send a friend request by typing your friend&apos;s email address above. Once accepted, one-click HD video and voice calling will be enabled immediately.
+                Send a friend request by typing your friend&apos;s email address in the Connect tab. Once accepted, one-click HD video and voice calling will be available immediately.
               </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setActiveTab('connect')}
+                className="mt-4 rounded-xl border-white/20 bg-white/5 text-xs text-blue-400 hover:text-white"
+              >
+                <UserPlus className="h-3.5 w-3.5 mr-1.5" />
+                Add a Friend by Email
+              </Button>
             </div>
           ) : filteredFriends.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-white/50 text-xs">
@@ -835,8 +1001,8 @@ export default function App() {
                   className="flex items-center justify-between rounded-2xl border border-white/15 bg-black/60 p-4 transition-all hover:border-white/30 hover:bg-white/[0.06] shadow-[0_4px_20px_rgba(0,0,0,0.6),inset_0_1px_1px_rgba(255,255,255,0.1)] group"
                 >
                   {/* Friend Info */}
-                  <div className="flex items-center gap-3">
-                    <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-2xl border border-white/15 shadow shrink-0">
                       <span>{friend.country === 'BD' ? '🇧🇩' : '🇨🇳'}</span>
                       <span
                         className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-black ${
@@ -845,26 +1011,26 @@ export default function App() {
                         title={friend.isOnline ? 'Online' : 'Offline'}
                       />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <h4 className="font-semibold text-sm text-white leading-tight">
+                        <h4 className="font-semibold text-sm text-white leading-tight truncate">
                           {friend.name}
                         </h4>
                         <Badge
                           variant="outline"
-                          className="text-[10px] py-0 px-1.5 border-white/10 bg-white/5 text-white/60"
+                          className="text-[10px] py-0 px-1.5 border-white/10 bg-white/5 text-white/60 shrink-0"
                         >
                           {friend.country === 'BD' ? 'Bangladesh' : 'China'}
                         </Badge>
                       </div>
-                      <p className="text-xs text-white/50 font-mono truncate max-w-[150px] sm:max-w-[180px] mt-0.5">
+                      <p className="text-xs text-white/50 font-mono truncate max-w-[140px] sm:max-w-[180px] mt-0.5">
                         {friend.email}
                       </p>
                     </div>
                   </div>
 
                   {/* Calling Actions */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     {/* Audio Call */}
                     <button
                       className="h-11 w-11 rounded-2xl flex items-center justify-center bg-white/10 hover:bg-white/20 text-white border border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)] active:scale-95 transition-all"
@@ -912,7 +1078,7 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('connect')}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-semibold transition-all relative ${
               activeTab === 'connect'
                 ? 'bg-blue-600/80 text-white shadow-[0_0_15px_rgba(59,130,246,0.4),inset_0_1px_1px_rgba(255,255,255,0.25)] border border-white/20'
                 : 'text-white/60 hover:text-white'
@@ -920,9 +1086,9 @@ export default function App() {
           >
             <UserPlus className="h-3.5 w-3.5" />
             <span>Connect</span>
-            {requests.length > 0 && (
+            {incomingRequests.length > 0 && (
               <span className="ml-0.5 text-[10px] px-1.5 py-0.2 rounded-full bg-red-500 text-white font-bold animate-pulse">
-                {requests.length}
+                {incomingRequests.length}
               </span>
             )}
           </button>

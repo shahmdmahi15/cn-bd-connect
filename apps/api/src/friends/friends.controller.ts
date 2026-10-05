@@ -21,7 +21,7 @@ export class FriendsController {
   @Post('request')
   async sendRequest(
     @CurrentUser() user: UserPayload,
-    @Body(new ValidationPipe({ whitelist: true })) dto: SendFriendRequestDto,
+    @Body() dto: SendFriendRequestDto,
   ) {
     return this.friendsService.sendRequest(user.id, dto.email);
   }
@@ -47,8 +47,24 @@ export class FriendsController {
     return this.friendsService.rejectRequest(user.id, requestId);
   }
 
+  @Post('requests/:id/cancel')
+  async cancelRequest(
+    @CurrentUser() user: UserPayload,
+    @Param('id') requestId: string,
+  ) {
+    return this.friendsService.cancelRequest(user.id, requestId);
+  }
+
   @Get()
   async getFriends(@CurrentUser() user: UserPayload) {
     return this.friendsService.getFriends(user.id);
+  }
+
+  @Post(':id/remove')
+  async removeFriend(
+    @CurrentUser() user: UserPayload,
+    @Param('id') friendId: string,
+  ) {
+    return this.friendsService.removeFriend(user.id, friendId);
   }
 }
