@@ -14,9 +14,9 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://cn-bd-connect-app.shahmdmahi.dpdns.org'),
-  title: 'China Bangladesh Connect | Communication App',
+  title: 'CN-BD Connect | China-Bangladesh Telecommunication',
   description:
-    'Dedicated ultra low-latency WebRTC video and audio calling connecting China and Bangladesh via Hong Kong relay. Made by Shah Md. Mahi.',
+    'Dedicated ultra-low latency WebRTC calling connecting China and Bangladesh via Hong Kong relay. Designed with iOS 26 Liquid Water-Morphism.',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
@@ -36,7 +36,7 @@ export const metadata: Metadata = {
     shortcut: '/favicon.ico',
   },
   openGraph: {
-    title: 'China Bangladesh Connect | Communication App',
+    title: 'CN-BD Connect | Ultra Low-Latency WebRTC Calling',
     description:
       'Ultra low-latency video and audio calling connecting China & Bangladesh via Hong Kong relay. Made by Shah Md. Mahi.',
     url: 'https://cn-bd-connect-app.shahmdmahi.dpdns.org',
@@ -46,7 +46,7 @@ export const metadata: Metadata = {
         url: '/og-image.png',
         width: 1200,
         height: 630,
-        alt: 'China Bangladesh Connect Logo',
+        alt: 'China Bangladesh Connect',
       },
       {
         url: '/logo.png',
@@ -60,7 +60,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'China Bangladesh Connect | Communication App',
+    title: 'CN-BD Connect | Ultra Low-Latency WebRTC Calling',
     description:
       'Ultra low-latency video and audio calling connecting China & Bangladesh via Hong Kong relay. Made by Shah Md. Mahi.',
     images: ['/og-image.png'],
@@ -68,11 +68,12 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: '#020617',
+  themeColor: '#000000',
   width: 'device-width',
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({
@@ -83,7 +84,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
+      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark bg-black`}
     >
       <head>
         <link rel="manifest" href="/manifest.json" />
@@ -93,8 +94,9 @@ export default function RootLayout({
         <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="mobile-web-app-capable" content="yes" />
       </head>
-      <body className="min-h-full flex flex-col bg-slate-950 text-slate-100">
+      <body className="min-h-full flex flex-col bg-black text-white selection:bg-blue-600/30 selection:text-white overscroll-none">
         {children}
         <script
           dangerouslySetInnerHTML={{

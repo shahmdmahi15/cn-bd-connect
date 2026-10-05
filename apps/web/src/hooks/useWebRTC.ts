@@ -29,19 +29,53 @@ export function useWebRTC(currentUser: any) {
   const [activePeer, setActivePeer] = useState<PeerUser | null>(null);
   const [isVideoCall, setIsVideoCall] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
+  const [isPeerMuted, setIsPeerMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isPeerVideoOff, setIsPeerVideoOff] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [networkStats, setNetworkStats] = useState<NetworkStats | null>(null);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([]);
   const incomingOfferRef = useRef<any>(null);
   const facingModeRef = useRef<'user' | 'environment'>('user');
   const statsIntervalRef = useRef<any>(null);
   const prevBytesReceivedRef = useRef<number>(0);
   const prevTimestampRef = useRef<number>(0);
+
+  // Send control message via P2P DataChannel with WebSocket signaling fallback
+  const sendControlMessage = useCallback(
+    (msg: { type: string; isMuted?: boolean; isVideoOff?: boolean }) => {
+      // 1. Primary: Direct P2P RTCDataChannel (zero latency)
+      if (
+        dataChannelRef.current &&
+        dataChannelRef.current.readyState === 'open'
+      ) {
+        try {
+          dataChannelRef.current.send(JSON.stringify(msg));
+        } catch (err) {
+          console.warn('[WebRTC DataChannel] Send failed:', err);
+        }
+      }
+
+      // 2. Fallback: WebSocket signaling server
+      if (activePeer) {
+        try {
+          const socket = getSocket();
+          socket.emit('call:control', {
+            toUserId: activePeer.id,
+            payload: msg,
+          });
+        } catch (err) {
+          console.warn('[WebRTC Socket] Send control failed:', err);
+        }
+      }
+    },
+    [activePeer],
+  );
 
   // Stop ringtones and reset all call resources
   const resetCall = useCallback(() => {
@@ -51,12 +85,22 @@ export function useWebRTC(currentUser: any) {
       statsIntervalRef.current = null;
     }
 
+    if (dataChannelRef.current) {
+      try {
+        dataChannelRef.current.close();
+      } catch (e) {
+        console.warn('Error closing data channel:', e);
+      }
+      dataChannelRef.current = null;
+    }
+
     if (pcRef.current) {
       try {
         pcRef.current.ontrack = null;
         pcRef.current.onicecandidate = null;
         pcRef.current.onconnectionstatechange = null;
         pcRef.current.oniceconnectionstatechange = null;
+        pcRef.current.ondatachannel = null;
         pcRef.current.close();
       } catch (e) {
         console.warn('Error closing peer connection:', e);
@@ -84,12 +128,14 @@ export function useWebRTC(currentUser: any) {
     setCallState('idle');
     setActivePeer(null);
     setIsMuted(false);
+    setIsPeerMuted(false);
     setIsVideoOff(false);
+    setIsPeerVideoOff(false);
     setIsScreenSharing(false);
     setNetworkStats(null);
   }, []);
 
-  // Fetch ICE configuration (Dedicated Hong Kong Coturn STUN/TURN + Cloudflare STUN)
+  // Fetch ICE configuration (Dedicated Coturn STUN/TURN)
   const fetchIceServers = useCallback(async (): Promise<RTCIceServer[]> => {
     try {
       const token = localStorage.getItem('token');
@@ -99,7 +145,6 @@ export function useWebRTC(currentUser: any) {
       if (res.ok) {
         const data = await res.json().catch(() => null);
         if (data?.iceServers && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
-          console.log('[WebRTC] Loaded ICE servers from Coturn API:', data.iceServers);
           return data.iceServers;
         }
       }
@@ -159,7 +204,6 @@ export function useWebRTC(currentUser: any) {
         return stream;
       } catch (err) {
         console.warn('Initial getUserMedia failed, retrying with basic constraints:', err);
-        // Fallback to basic audio/video constraints without dimensions
         try {
           const fallbackStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
@@ -261,7 +305,7 @@ export function useWebRTC(currentUser: any) {
     }, 1500);
   }, []);
 
-  // Initialize RTCPeerConnection with optimal ICE parameters
+  // Initialize RTCPeerConnection with optimal ICE parameters and DataChannel
   const createPeerConnection = useCallback(
     async (peer: PeerUser): Promise<RTCPeerConnection> => {
       const iceServers = await fetchIceServers();
@@ -277,6 +321,48 @@ export function useWebRTC(currentUser: any) {
       // Cumulative remote media stream to guarantee both audio & video tracks are bound
       const accumulatedStream = new MediaStream();
       remoteStreamRef.current = accumulatedStream;
+
+      // Setup negotiated DataChannel for P2P control messages
+      try {
+        const dc = pc.createDataChannel('cn-bd-control', {
+          negotiated: true,
+          id: 0,
+        });
+
+        dc.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'mute') {
+              setIsPeerMuted(Boolean(data.isMuted));
+            } else if (data.type === 'video_off') {
+              setIsPeerVideoOff(Boolean(data.isVideoOff));
+            }
+          } catch (e) {
+            console.warn('[WebRTC DataChannel parse error]:', e);
+          }
+        };
+
+        dataChannelRef.current = dc;
+      } catch (dcErr) {
+        console.warn('[WebRTC] Negotiated DataChannel error:', dcErr);
+      }
+
+      pc.ondatachannel = (event) => {
+        const dc = event.channel;
+        dataChannelRef.current = dc;
+        dc.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'mute') {
+              setIsPeerMuted(Boolean(data.isMuted));
+            } else if (data.type === 'video_off') {
+              setIsPeerVideoOff(Boolean(data.isVideoOff));
+            }
+          } catch (err) {
+            console.warn('[WebRTC DataChannel ondatachannel error]:', err);
+          }
+        };
+      };
 
       // Handle remote incoming audio & video tracks
       pc.ontrack = (event) => {
@@ -295,7 +381,6 @@ export function useWebRTC(currentUser: any) {
 
         const updateState = () => {
           if (remoteStreamRef.current) {
-            // Emitting a fresh MediaStream reference forces React to update and trigger DOM bindings
             setRemoteStream(new MediaStream(remoteStreamRef.current.getTracks()));
           }
         };
@@ -470,27 +555,61 @@ export function useWebRTC(currentUser: any) {
     resetCall();
   }, [activePeer, resetCall]);
 
-  // Hardware Controls: Mute Audio
+  // Hardware Controls: Mute Audio (reliably toggles localStreamRef + pcRef senders, updates state, notifies peer)
   const toggleMute = useCallback(() => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
-      }
-    }
-  }, []);
+    setIsMuted((prev) => {
+      const nextMuted = !prev;
 
-  // Hardware Controls: Toggle Video
-  const toggleVideo = useCallback(() => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsVideoOff(!videoTrack.enabled);
+      // 1. Toggle all local audio tracks
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks().forEach((track) => {
+          track.enabled = !nextMuted;
+        });
       }
-    }
-  }, []);
+
+      // 2. Toggle all audio senders on the RTCPeerConnection
+      if (pcRef.current) {
+        pcRef.current.getSenders().forEach((sender) => {
+          if (sender.track && sender.track.kind === 'audio') {
+            sender.track.enabled = !nextMuted;
+          }
+        });
+      }
+
+      // 3. Notify peer via DataChannel & WebSocket signaling fallback
+      sendControlMessage({ type: 'mute', isMuted: nextMuted });
+
+      return nextMuted;
+    });
+  }, [sendControlMessage]);
+
+  // Hardware Controls: Toggle Video (toggles localStreamRef + pcRef senders, updates state, notifies peer)
+  const toggleVideo = useCallback(() => {
+    setIsVideoOff((prev) => {
+      const nextVideoOff = !prev;
+
+      // 1. Toggle all local video tracks
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach((track) => {
+          track.enabled = !nextVideoOff;
+        });
+      }
+
+      // 2. Toggle all video senders on the RTCPeerConnection
+      if (pcRef.current) {
+        pcRef.current.getSenders().forEach((sender) => {
+          if (sender.track && sender.track.kind === 'video') {
+            sender.track.enabled = !nextVideoOff;
+          }
+        });
+      }
+
+      // 3. Notify peer via DataChannel & WebSocket signaling fallback
+      sendControlMessage({ type: 'video_off', isVideoOff: nextVideoOff });
+
+      return nextVideoOff;
+    });
+  }, [sendControlMessage]);
 
   // Hardware Controls: Switch Camera (Front/Back)
   const switchCamera = useCallback(async () => {
@@ -599,7 +718,6 @@ export function useWebRTC(currentUser: any) {
             new RTCSessionDescription(data.answer),
           );
 
-          // Drain any ICE candidates received early
           while (pendingCandidates.current.length > 0) {
             const candidate = pendingCandidates.current.shift();
             if (candidate && (candidate.candidate || candidate.candidate === '')) {
@@ -662,6 +780,19 @@ export function useWebRTC(currentUser: any) {
       resetCall();
     };
 
+    // 7. Signaling Fallback for Remote Peer Control Messages
+    const handleControlMessage = (data: {
+      fromUserId: string;
+      payload: { type: string; isMuted?: boolean; isVideoOff?: boolean };
+    }) => {
+      if (!data?.payload) return;
+      if (data.payload.type === 'mute') {
+        setIsPeerMuted(Boolean(data.payload.isMuted));
+      } else if (data.payload.type === 'video_off') {
+        setIsPeerVideoOff(Boolean(data.payload.isVideoOff));
+      }
+    };
+
     socket.on('call:incoming', handleIncomingCall);
     socket.on('call:accepted', handleCallAccepted);
     socket.on('call:rejected', handleCallRejected);
@@ -669,6 +800,7 @@ export function useWebRTC(currentUser: any) {
     socket.on('call:ice_candidate', handleIceCandidate);
     socket.on('call:offline', handleCallOffline);
     socket.on('call:busy', handleCallBusy);
+    socket.on('call:control', handleControlMessage);
 
     return () => {
       socket.off('call:incoming', handleIncomingCall);
@@ -678,6 +810,7 @@ export function useWebRTC(currentUser: any) {
       socket.off('call:ice_candidate', handleIceCandidate);
       socket.off('call:offline', handleCallOffline);
       socket.off('call:busy', handleCallBusy);
+      socket.off('call:control', handleControlMessage);
     };
   }, [currentUser, resetCall]);
 
@@ -688,7 +821,9 @@ export function useWebRTC(currentUser: any) {
     activePeer,
     isVideoCall,
     isMuted,
+    isPeerMuted,
     isVideoOff,
+    isPeerVideoOff,
     isScreenSharing,
     networkStats,
     startCall,

@@ -18,12 +18,15 @@ import {
   VolumeX,
   ShieldCheck,
   Zap,
+  Layers,
+  Crop,
+  Radio,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import type { PeerUser, NetworkStats } from '@/hooks/useWebRTC';
 
-interface CallScreenProps {
+export interface CallScreenProps {
   callState: 'idle' | 'calling' | 'incoming' | 'connected' | 'ended';
   activePeer: PeerUser | null;
   isVideoCall: boolean;
@@ -33,6 +36,8 @@ interface CallScreenProps {
   isVideoOff: boolean;
   isScreenSharing: boolean;
   networkStats: NetworkStats | null;
+  isPeerMuted?: boolean;
+  isPeerVideoOff?: boolean;
   onAnswer: () => void;
   onReject: () => void;
   onEnd: () => void;
@@ -52,6 +57,8 @@ export function CallScreen({
   isVideoOff,
   isScreenSharing,
   networkStats,
+  isPeerMuted = false,
+  isPeerVideoOff = false,
   onAnswer,
   onReject,
   onEnd,
@@ -62,7 +69,12 @@ export function CallScreen({
 }: CallScreenProps) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const ambientVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+
+  // Web Audio Context fallback to guarantee audio driver output
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
   const [callDuration, setCallDuration] = useState(0);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
@@ -70,26 +82,73 @@ export function CallScreen({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [pipMinimized, setPipMinimized] = useState(false);
   const [hasRemoteVideoTrack, setHasRemoteVideoTrack] = useState(false);
+  // 'contain' keeps mobile 9:16 stream uncropped on desktop 16:9, with ambient blurred glow.
+  // 'cover' zooms to fill screen.
+  const [videoFitMode, setVideoFitMode] = useState<'contain' | 'cover'>('contain');
 
-  // Play audio/video safely across iOS Safari, Android Chrome, and Desktop
-  const attemptPlayback = useCallback(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
-      const vPromise = remoteVideoRef.current.play();
-      if (vPromise !== undefined) {
-        vPromise
-          .then(() => {
-            setAutoplayBlocked(false);
-          })
-          .catch((err) => {
-            console.warn('[CallScreen] Remote video autoplay prevented:', err);
-            setAutoplayBlocked(true);
-          });
+  // Initialize or resume Web Audio API pipeline
+  const initWebAudioPipeline = useCallback((stream: MediaStream) => {
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioCtx();
       }
+
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      // Reconnect source node
+      if (audioSourceRef.current) {
+        try {
+          audioSourceRef.current.disconnect();
+        } catch {}
+      }
+
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0 && audioTracks.some((t) => t.enabled)) {
+        audioSourceRef.current = ctx.createMediaStreamSource(stream);
+        audioSourceRef.current.connect(ctx.destination);
+      }
+    } catch (err) {
+      console.warn('[CallScreen] Web Audio pipeline initialization warning:', err);
+    }
+  }, []);
+
+  // Safe playback function
+  const attemptPlayback = useCallback(() => {
+    // 1. Remote video MUST remain muted={true} to avoid browser autoplay policy restrictions
+    if (remoteVideoRef.current && remoteStream) {
+      if (remoteVideoRef.current.srcObject !== remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      }
+      remoteVideoRef.current.play().catch((err) => {
+        console.warn('[CallScreen] Video play deferred:', err);
+      });
     }
 
+    // 2. Ambient backdrop video
+    if (ambientVideoRef.current && remoteStream) {
+      if (ambientVideoRef.current.srcObject !== remoteStream) {
+        ambientVideoRef.current.srcObject = remoteStream;
+      }
+      ambientVideoRef.current.play().catch(() => {});
+    }
+
+    // 3. Audio element: unmuted, high volume
     if (remoteAudioRef.current && remoteStream) {
-      remoteAudioRef.current.srcObject = remoteStream;
+      if (remoteAudioRef.current.srcObject !== remoteStream) {
+        remoteAudioRef.current.srcObject = remoteStream;
+      }
+      remoteAudioRef.current.volume = 1.0;
+      remoteAudioRef.current.muted = false;
+
       const aPromise = remoteAudioRef.current.play();
       if (aPromise !== undefined) {
         aPromise
@@ -97,12 +156,52 @@ export function CallScreen({
             setAutoplayBlocked(false);
           })
           .catch((err) => {
-            console.warn('[CallScreen] Remote audio autoplay prevented:', err);
+            console.warn('[CallScreen] Remote audio autoplay blocked:', err);
             setAutoplayBlocked(true);
+            // Try Web Audio pipeline fallback
+            initWebAudioPipeline(remoteStream);
           });
       }
     }
+  }, [remoteStream, initWebAudioPipeline]);
+
+  // Global user interaction listener to unblock audio on first gesture
+  useEffect(() => {
+    const handleUserGesture = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume().catch(() => {});
+      }
+      if (remoteAudioRef.current && remoteStream) {
+        remoteAudioRef.current.play().then(() => setAutoplayBlocked(false)).catch(() => {});
+      }
+    };
+
+    window.addEventListener('click', handleUserGesture, { passive: true });
+    window.addEventListener('touchstart', handleUserGesture, { passive: true });
+    window.addEventListener('keydown', handleUserGesture, { passive: true });
+
+    return () => {
+      window.removeEventListener('click', handleUserGesture);
+      window.removeEventListener('touchstart', handleUserGesture);
+      window.removeEventListener('keydown', handleUserGesture);
+    };
   }, [remoteStream]);
+
+  // Clean up Web Audio Context on unmount or call end
+  useEffect(() => {
+    return () => {
+      if (audioSourceRef.current) {
+        try {
+          audioSourceRef.current.disconnect();
+        } catch {}
+      }
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close().catch(() => {});
+        } catch {}
+      }
+    };
+  }, []);
 
   // Handle local video element binding
   useEffect(() => {
@@ -118,7 +217,7 @@ export function CallScreen({
       const vTracks = remoteStream.getVideoTracks();
       const aTracks = remoteStream.getAudioTracks();
       console.log(
-        `[CallScreen] Binding remote stream: ${vTracks.length} video tracks, ${aTracks.length} audio tracks`,
+        `[CallScreen] Remote stream active: ${vTracks.length} video tracks, ${aTracks.length} audio tracks`,
       );
       setHasRemoteVideoTrack(vTracks.length > 0 && vTracks.some((t) => t.enabled));
       attemptPlayback();
@@ -147,6 +246,12 @@ export function CallScreen({
   };
 
   const handleUnblockAutoplay = () => {
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume().catch(() => {});
+    }
+    if (remoteStream) {
+      initWebAudioPipeline(remoteStream);
+    }
     setAutoplayBlocked(false);
     attemptPlayback();
   };
@@ -163,16 +268,17 @@ export function CallScreen({
 
   if (callState === 'idle') return null;
 
-  // --- 1. INCOMING CALL SCREEN ---
+  // --- 1. INCOMING CALL SCREEN (iOS 26 Liquid Water-Morphism) ---
   if (callState === 'incoming') {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 backdrop-blur-2xl p-4">
-        {/* Ambient background glow */}
-        <div className="absolute inset-0 bg-gradient-to-tr from-blue-900/30 via-slate-950 to-emerald-950/20 pointer-events-none" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 backdrop-blur-3xl animate-in fade-in duration-300">
+        {/* Ambient liquid lighting glow */}
+        <div className="absolute top-1/4 -left-20 h-96 w-96 rounded-full bg-blue-600/20 blur-3xl pointer-events-none" />
+        <div className="absolute bottom-1/4 -right-20 h-96 w-96 rounded-full bg-emerald-600/20 blur-3xl pointer-events-none" />
 
-        <div className="relative w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/80 p-8 text-center shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95">
+        <div className="relative w-full max-w-sm rounded-3xl border border-white/20 bg-black/60 p-8 text-center shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl animate-in zoom-in-95 duration-300">
           {/* Custom Logo Emblem with pulsing radar rings */}
-          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-4 ring-blue-500/30">
+          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border border-white/25 shadow-2xl ring-4 ring-blue-500/20">
             <Image
               src="/logo.png"
               alt="China Bangladesh Connect"
@@ -182,53 +288,51 @@ export function CallScreen({
               priority
             />
             <div className="absolute inset-0 rounded-3xl border-2 border-blue-400/40 animate-ping pointer-events-none" />
-            <div className="absolute -inset-3 rounded-3xl border border-blue-500/20 animate-pulse pointer-events-none" />
+            <div className="absolute -inset-2 rounded-3xl border border-blue-500/20 animate-pulse pointer-events-none" />
           </div>
 
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 mb-3">
-            <Zap className="h-3 w-3 animate-bounce" />
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-300 border border-blue-500/30 mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
+            <Radio className="h-3 w-3 animate-pulse text-blue-400" />
             Incoming {isVideoCall ? 'HD Video Call' : 'Ultra-Low Latency Audio Call'}
           </span>
 
           <h3 className="text-2xl font-bold text-white tracking-tight mb-1">
             {activePeer?.name}
           </h3>
-          <p className="text-xs text-slate-400 font-mono mb-4">{activePeer?.email}</p>
+          <p className="text-xs text-white/50 font-mono mb-4">{activePeer?.email}</p>
 
           <div className="flex items-center justify-center gap-2 mb-8">
-            <Badge variant="outline" className="border-slate-700 bg-slate-800/60 text-slate-300">
+            <Badge variant="outline" className="border-white/15 bg-white/5 text-white/80">
               {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
             </Badge>
-            <Badge variant="outline" className="border-slate-700 bg-slate-800/60 text-emerald-400">
+            <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
               Hong Kong Relay Ready
             </Badge>
           </div>
 
           {/* Action buttons */}
-          <div className="flex items-center justify-center gap-8">
+          <div className="flex items-center justify-center gap-10">
             {/* Decline */}
             <div className="flex flex-col items-center gap-2">
-              <Button
-                variant="destructive"
-                size="icon"
-                className="h-16 w-16 rounded-full shadow-lg shadow-red-600/40 hover:scale-105 transition-transform"
+              <button
+                className="h-16 w-16 rounded-full flex items-center justify-center bg-red-600/90 hover:bg-red-500 text-white shadow-[0_8px_25px_rgba(239,68,68,0.5),inset_0_1px_1px_rgba(255,255,255,0.4)] border border-white/20 active:scale-95 transition-all"
                 onClick={onReject}
+                title="Decline Call"
               >
                 <PhoneOff className="h-7 w-7" />
-              </Button>
-              <span className="text-[11px] text-slate-400 font-medium">Decline</span>
+              </button>
+              <span className="text-[11px] text-white/60 font-medium">Decline</span>
             </div>
 
             {/* Accept */}
             <div className="flex flex-col items-center gap-2">
-              <Button
-                variant="success"
-                size="icon"
-                className="h-16 w-16 rounded-full shadow-lg shadow-emerald-500/40 bg-emerald-500 hover:bg-emerald-400 hover:scale-105 transition-transform animate-bounce"
+              <button
+                className="h-16 w-16 rounded-full flex items-center justify-center bg-emerald-600/90 hover:bg-emerald-500 text-white shadow-[0_8px_25px_rgba(16,185,129,0.5),inset_0_1px_1px_rgba(255,255,255,0.4)] border border-white/20 active:scale-95 transition-all animate-bounce"
                 onClick={onAnswer}
+                title="Accept Call"
               >
-                <Phone className="h-7 w-7 text-white" />
-              </Button>
+                <Phone className="h-7 w-7" />
+              </button>
               <span className="text-[11px] text-emerald-400 font-medium">Accept</span>
             </div>
           </div>
@@ -240,12 +344,12 @@ export function CallScreen({
   // --- 2. OUTGOING CALLING SCREEN ---
   if (callState === 'calling') {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-4 backdrop-blur-2xl">
-        <div className="absolute inset-0 bg-radial from-blue-900/20 via-slate-950 to-slate-950 pointer-events-none" />
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 backdrop-blur-3xl animate-in fade-in duration-300">
+        <div className="absolute top-1/4 -right-20 h-96 w-96 rounded-full bg-blue-600/15 blur-3xl pointer-events-none" />
 
-        <div className="relative w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900/80 p-8 text-center shadow-2xl backdrop-blur-xl">
+        <div className="relative w-full max-w-sm rounded-3xl border border-white/20 bg-black/60 p-8 text-center shadow-[0_20px_50px_rgba(0,0,0,0.9),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl animate-in zoom-in-95 duration-300">
           {/* Custom Logo Emblem */}
-          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-4 ring-blue-500/30">
+          <div className="relative mx-auto mb-6 flex h-32 w-32 items-center justify-center rounded-3xl overflow-hidden border border-white/25 shadow-2xl ring-4 ring-blue-500/20">
             <Image
               src="/logo.png"
               alt="China Bangladesh Connect"
@@ -254,33 +358,32 @@ export function CallScreen({
               className="h-full w-full object-cover"
               priority
             />
-            <div className="absolute inset-0 rounded-3xl border-2 border-blue-400/30 animate-ping pointer-events-none" />
+            <div className="absolute inset-0 rounded-3xl border-2 border-blue-400/40 animate-ping pointer-events-none" />
           </div>
 
           <h3 className="text-xl font-bold text-white mb-1">Calling {activePeer?.name}...</h3>
-          <p className="text-xs text-slate-400 mb-6 flex items-center justify-center gap-1.5">
+          <p className="text-xs text-white/60 mb-6 flex items-center justify-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            Establishing secure route via Hong Kong Coturn
+            Establishing route via Hong Kong Coturn
           </p>
 
           <div className="flex items-center justify-center gap-2 mb-8">
-            <Badge variant="outline" className="border-slate-800 bg-slate-800/60 text-slate-300">
+            <Badge variant="outline" className="border-white/15 bg-white/5 text-white/80">
               {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
             </Badge>
-            <Badge variant="outline" className="border-slate-800 bg-slate-800/60 text-blue-400">
+            <Badge variant="outline" className="border-blue-500/30 bg-blue-500/10 text-blue-400">
               {isVideoCall ? 'Video Call' : 'Voice Call'}
             </Badge>
           </div>
 
           <div className="flex justify-center">
-            <Button
-              variant="destructive"
-              size="icon"
-              className="h-16 w-16 rounded-full shadow-lg shadow-red-600/40 hover:scale-105 transition-transform"
+            <button
+              className="h-16 w-16 rounded-full flex items-center justify-center bg-red-600/90 hover:bg-red-500 text-white shadow-[0_8px_25px_rgba(239,68,68,0.5),inset_0_1px_1px_rgba(255,255,255,0.4)] border border-white/20 active:scale-95 transition-all"
               onClick={onEnd}
+              title="Cancel Call"
             >
               <PhoneOff className="h-7 w-7" />
-            </Button>
+            </button>
           </div>
         </div>
       </div>
@@ -290,36 +393,36 @@ export function CallScreen({
   // --- 3. ACTIVE CONNECTED CALL SCREEN ---
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black text-white select-none overflow-hidden">
-      {/* Background audio element to guarantee playback independent of video rendering */}
+      {/* Offscreen audio element with explicit volume and unmuted configuration */}
       <audio ref={remoteAudioRef} autoPlay playsInline />
 
-      {/* Autoplay restriction fallback banner */}
+      {/* Autoplay restriction warning banner */}
       {autoplayBlocked && (
         <div
           onClick={handleUnblockAutoplay}
-          className="absolute top-16 inset-x-4 z-40 mx-auto max-w-md cursor-pointer rounded-2xl border border-amber-500/40 bg-amber-500/20 p-4 shadow-2xl backdrop-blur-xl animate-in fade-in slide-in-from-top-4"
+          className="absolute top-16 inset-x-4 z-40 mx-auto max-w-md cursor-pointer rounded-2xl border border-amber-500/40 bg-black/80 p-4 shadow-[0_8px_32px_rgba(245,158,11,0.25),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-2xl animate-in fade-in slide-in-from-top-4"
         >
           <div className="flex items-center gap-3 text-amber-200">
             <Volume2 className="h-6 w-6 shrink-0 animate-bounce text-amber-400" />
             <div className="text-left">
-              <p className="text-xs font-bold leading-tight">Sound / Video Paused by Browser</p>
-              <p className="text-[11px] text-amber-300/80">Tap anywhere on this banner to enable audio & video</p>
+              <p className="text-xs font-bold leading-tight">Sound Paused by Browser</p>
+              <p className="text-[11px] text-amber-300/80">Tap here to enable laptop audio & microphone</p>
             </div>
             <Button
               size="sm"
-              className="ml-auto h-8 bg-amber-500 text-slate-950 font-bold hover:bg-amber-400 text-xs px-3"
+              className="ml-auto h-8 bg-amber-500 text-black font-bold hover:bg-amber-400 text-xs px-3 rounded-full"
             >
-              Tap to Play
+              Unmute
             </Button>
           </div>
         </div>
       )}
 
-      {/* Top Glassmorphic HUD */}
-      <div className="absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-slate-950/90 via-slate-950/40 to-transparent">
+      {/* Top Glassmorphic Liquid HUD */}
+      <div className="absolute top-0 inset-x-0 z-30 flex items-center justify-between p-4 bg-gradient-to-b from-black/90 via-black/40 to-transparent pt-safe">
         {/* Left: Mini Emblem, Peer identity and duration */}
         <div className="flex items-center gap-3">
-          <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/20 shadow ring-2 ring-blue-500/20 shrink-0">
+          <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/20 shadow-lg ring-2 ring-blue-500/20 shrink-0">
             <Image
               src="/logo.png"
               alt="CN-BD Connect"
@@ -332,7 +435,7 @@ export function CallScreen({
           <div>
             <div className="flex items-center gap-2">
               <h4 className="font-semibold text-sm leading-tight text-white">{activePeer?.name}</h4>
-              <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-slate-700 bg-slate-900/60 text-slate-300">
+              <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-white/15 bg-white/5 text-white/80">
                 {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
               </Badge>
             </div>
@@ -343,12 +446,34 @@ export function CallScreen({
           </div>
         </div>
 
-        {/* Right: Real-time Telemetry & Quality HUD */}
+        {/* Right: Telemetry & Display Controls */}
         <div className="flex items-center gap-2">
+          {/* Fit vs Fill Zoom Toggle for Desktop Screen */}
+          {isVideoCall && (
+            <button
+              onClick={() => setVideoFitMode((prev) => (prev === 'contain' ? 'cover' : 'contain'))}
+              className="flex items-center gap-1.5 rounded-full border border-white/15 bg-black/60 px-2.5 py-1 text-xs font-mono backdrop-blur-xl hover:bg-white/10 transition-colors shadow-lg"
+              title={videoFitMode === 'contain' ? 'Switch to Fill (Cropped)' : 'Switch to Fit (No Zoom)'}
+            >
+              {videoFitMode === 'contain' ? (
+                <>
+                  <Layers className="h-3.5 w-3.5 text-blue-400" />
+                  <span className="text-[10px] text-white/80 hidden sm:inline">Fit (9:16)</span>
+                </>
+              ) : (
+                <>
+                  <Crop className="h-3.5 w-3.5 text-amber-400" />
+                  <span className="text-[10px] text-white/80 hidden sm:inline">Fill (Zoom)</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {/* Network Stats Chip */}
           {networkStats && (
             <div
               onClick={() => setShowDetailedStats(!showDetailedStats)}
-              className="flex items-center gap-2 bg-slate-900/80 border border-white/10 rounded-full px-3 py-1 text-xs font-mono backdrop-blur-md cursor-pointer hover:bg-slate-800/80 transition-colors shadow-lg"
+              className="flex items-center gap-2 bg-black/60 border border-white/15 rounded-full px-3 py-1 text-xs font-mono backdrop-blur-xl cursor-pointer hover:bg-white/10 transition-colors shadow-lg"
             >
               <span
                 className={`flex items-center gap-1 font-semibold ${
@@ -362,23 +487,15 @@ export function CallScreen({
                 <Activity className="h-3 w-3" />
                 {networkStats.rttMs}ms
               </span>
-              <span className="text-slate-600">|</span>
-              <span className="text-slate-300">
+              <span className="text-white/20">|</span>
+              <span className="text-white/80">
                 {networkStats.bitrateKbps > 1000
                   ? `${(networkStats.bitrateKbps / 1000).toFixed(1)}M`
                   : `${networkStats.bitrateKbps}k`}
               </span>
-              <span className="text-slate-600">|</span>
-              <span
-                className={
-                  networkStats.packetLossPercent > 2 ? 'text-red-400' : 'text-slate-400'
-                }
-              >
-                {networkStats.packetLossPercent}%
-              </span>
               <Badge
                 variant="outline"
-                className="text-[9px] py-0 px-1 border-white/10 bg-slate-800 text-blue-400 ml-0.5"
+                className="text-[9px] py-0 px-1 border-white/15 bg-white/5 text-blue-400 ml-0.5"
               >
                 {networkStats.relayType === 'relay' ? 'HK RELAY' : 'DIRECT P2P'}
               </Badge>
@@ -389,81 +506,115 @@ export function CallScreen({
             variant="ghost"
             size="sm"
             onClick={toggleFullscreen}
-            className="h-8 w-8 p-0 rounded-full text-slate-300 hover:text-white hover:bg-white/10"
+            className="h-8 w-8 p-0 rounded-full text-white/80 hover:text-white hover:bg-white/10"
           >
             {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </Button>
         </div>
       </div>
 
-      {/* Detailed Telemetry Drawer Modal */}
+      {/* Detailed Telemetry Modal */}
       {showDetailedStats && networkStats && (
-        <div className="absolute top-16 right-4 z-30 w-72 rounded-2xl border border-white/10 bg-slate-900/95 p-4 shadow-2xl backdrop-blur-2xl text-xs space-y-2.5 animate-in fade-in zoom-in-95">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div className="absolute top-16 right-4 z-30 w-72 rounded-2xl border border-white/20 bg-black/80 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.2)] backdrop-blur-3xl text-xs space-y-2.5 animate-in fade-in zoom-in-95">
+          <div className="flex items-center justify-between border-b border-white/10 pb-2">
             <div className="flex items-center gap-1.5 font-semibold text-white">
               <ShieldCheck className="h-4 w-4 text-emerald-400" />
               <span>Route Diagnostics</span>
             </div>
             <button
               onClick={() => setShowDetailedStats(false)}
-              className="text-slate-400 hover:text-white"
+              className="text-white/50 hover:text-white"
             >
               ✕
             </button>
           </div>
           <div className="grid grid-cols-2 gap-2 text-[11px]">
-            <div className="bg-slate-800/50 p-2 rounded-xl">
-              <span className="text-slate-400 block text-[10px]">Round-Trip Time</span>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Round-Trip Time</span>
               <span className="font-mono font-bold text-emerald-400">{networkStats.rttMs} ms</span>
             </div>
-            <div className="bg-slate-800/50 p-2 rounded-xl">
-              <span className="text-slate-400 block text-[10px]">Ingress Bitrate</span>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Ingress Bitrate</span>
               <span className="font-mono font-bold text-blue-400">{networkStats.bitrateKbps} kbps</span>
             </div>
-            <div className="bg-slate-800/50 p-2 rounded-xl">
-              <span className="text-slate-400 block text-[10px]">Packet Loss</span>
-              <span className="font-mono font-bold text-slate-200">{networkStats.packetLossPercent}%</span>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Packet Loss</span>
+              <span className="font-mono font-bold text-white/80">{networkStats.packetLossPercent}%</span>
             </div>
-            <div className="bg-slate-800/50 p-2 rounded-xl">
-              <span className="text-slate-400 block text-[10px]">Transport Mode</span>
+            <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+              <span className="text-white/40 block text-[10px]">Transport Mode</span>
               <span className="font-mono font-bold text-indigo-400 uppercase">{networkStats.relayType}</span>
             </div>
             {networkStats.resolution && (
-              <div className="bg-slate-800/50 p-2 rounded-xl">
-                <span className="text-slate-400 block text-[10px]">Resolution</span>
-                <span className="font-mono font-bold text-slate-200">{networkStats.resolution}</span>
+              <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+                <span className="text-white/40 block text-[10px]">Resolution</span>
+                <span className="font-mono font-bold text-white/80">{networkStats.resolution}</span>
               </div>
             )}
             {networkStats.frameRate !== undefined && networkStats.frameRate > 0 && (
-              <div className="bg-slate-800/50 p-2 rounded-xl">
-                <span className="text-slate-400 block text-[10px]">Frame Rate</span>
+              <div className="bg-white/5 p-2 rounded-xl border border-white/5">
+                <span className="text-white/40 block text-[10px]">Frame Rate</span>
                 <span className="font-mono font-bold text-emerald-400">{networkStats.frameRate} fps</span>
               </div>
             )}
           </div>
-          <div className="text-[10px] text-slate-400 bg-slate-950/60 p-2 rounded-xl border border-slate-800">
+          <div className="text-[10px] text-white/50 bg-black/60 p-2 rounded-xl border border-white/10">
             Route: BD ⇄ AWS Lightsail (Hong Kong ap-east-1) ⇄ CN
           </div>
         </div>
       )}
 
       {/* Main Remote View Container */}
-      <div className="relative flex-1 bg-slate-950 flex items-center justify-center overflow-hidden">
-        {/* Remote Video Element */}
+      <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+        {/* Ambient blurred backdrop video (fixes desktop aspect ratio cropping aesthetics) */}
+        {isVideoCall && hasRemoteVideoTrack && !isPeerVideoOff && (
+          <video
+            ref={ambientVideoRef}
+            muted
+            autoPlay
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover blur-3xl opacity-35 scale-125 pointer-events-none select-none transition-opacity duration-500"
+          />
+        )}
+
+        {/* Remote Video Element: strictly muted={true} to avoid browser autoplay restrictions */}
         <video
           ref={remoteVideoRef}
+          muted
           autoPlay
           playsInline
-          className={`w-full h-full object-cover transition-opacity duration-300 ${
-            isVideoCall && hasRemoteVideoTrack ? 'opacity-100' : 'opacity-0 absolute pointer-events-none'
+          className={`relative z-10 transition-all duration-300 max-h-screen ${
+            videoFitMode === 'contain'
+              ? 'w-full h-full object-contain'
+              : 'w-full h-full object-cover'
+          } ${
+            isVideoCall && hasRemoteVideoTrack && !isPeerVideoOff
+              ? 'opacity-100'
+              : 'opacity-0 absolute pointer-events-none'
           }`}
         />
 
+        {/* Peer Status Overlay (Muted or Camera Off badge) */}
+        <div className="absolute top-20 left-4 z-20 flex flex-col gap-2 pointer-events-none">
+          {isPeerMuted && (
+            <div className="flex items-center gap-1.5 rounded-full border border-red-500/40 bg-black/70 px-3 py-1 text-xs text-red-400 backdrop-blur-xl shadow-lg animate-in fade-in">
+              <MicOff className="h-3.5 w-3.5" />
+              <span>Peer is muted</span>
+            </div>
+          )}
+          {isPeerVideoOff && (
+            <div className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-black/70 px-3 py-1 text-xs text-amber-400 backdrop-blur-xl shadow-lg animate-in fade-in">
+              <VideoOff className="h-3.5 w-3.5" />
+              <span>Peer turned camera off</span>
+            </div>
+          )}
+        </div>
+
         {/* Audio-only or Camera Off: Grand Emblem Display */}
-        {(!isVideoCall || !hasRemoteVideoTrack) && (
-          <div className="flex flex-col items-center justify-center gap-5 text-center p-6 animate-in fade-in">
+        {(!isVideoCall || !hasRemoteVideoTrack || isPeerVideoOff) && (
+          <div className="relative z-10 flex flex-col items-center justify-center gap-5 text-center p-6 animate-in fade-in">
             {/* High-res Emblem with pulsing ring */}
-            <div className="relative flex h-48 w-48 sm:h-56 sm:w-56 items-center justify-center rounded-3xl overflow-hidden border-2 border-white/20 shadow-2xl ring-8 ring-blue-500/20">
+            <div className="relative flex h-48 w-48 sm:h-56 sm:w-56 items-center justify-center rounded-3xl overflow-hidden border border-white/20 shadow-2xl ring-8 ring-blue-500/20">
               <Image
                 src="/logo.png"
                 alt="China Bangladesh Connect Emblem"
@@ -478,12 +629,12 @@ export function CallScreen({
             <div>
               <div className="flex items-center justify-center gap-2">
                 <h2 className="text-2xl font-bold text-white tracking-tight">{activePeer?.name}</h2>
-                <Badge variant="outline" className="text-xs border-slate-700 bg-slate-900/60 text-slate-300">
+                <Badge variant="outline" className="text-xs border-white/15 bg-white/5 text-white/80">
                   {activePeer?.country === 'BD' ? 'Bangladesh 🇧🇩' : 'China 🇨🇳'}
                 </Badge>
               </div>
-              <p className="text-xs text-slate-400 font-mono mt-1">{activePeer?.email}</p>
-              <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <p className="text-xs text-white/50 font-mono mt-1">{activePeer?.email}</p>
+              <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Connected via Dedicated Hong Kong Bridge</span>
               </div>
@@ -494,7 +645,7 @@ export function CallScreen({
         {/* Local Picture-in-Picture Floating Window */}
         {isVideoCall && (
           <div
-            className={`absolute bottom-24 right-4 z-20 rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl bg-slate-900 transition-all duration-300 ${
+            className={`absolute bottom-28 right-4 z-20 rounded-2xl overflow-hidden border border-white/25 shadow-2xl bg-black/80 backdrop-blur-xl transition-all duration-300 ${
               pipMinimized ? 'h-14 w-14' : 'h-44 w-32 sm:h-52 sm:w-36'
             }`}
           >
@@ -506,14 +657,14 @@ export function CallScreen({
               className={`w-full h-full object-cover ${pipMinimized ? 'hidden' : 'block'}`}
             />
             {isVideoOff && !pipMinimized && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-xs text-slate-400 p-2 text-center">
-                <VideoOff className="h-5 w-5 mb-1 text-slate-500" />
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 text-xs text-white/60 p-2 text-center">
+                <VideoOff className="h-5 w-5 mb-1 text-white/40" />
                 <span>Camera Off</span>
               </div>
             )}
             <button
               onClick={() => setPipMinimized(!pipMinimized)}
-              className="absolute top-1.5 right-1.5 z-10 rounded-full bg-slate-950/70 p-1 text-slate-300 hover:text-white"
+              className="absolute top-1.5 right-1.5 z-10 rounded-full bg-black/70 p-1 text-white/80 hover:text-white"
             >
               {pipMinimized ? <Maximize2 className="h-3 w-3" /> : <Minimize2 className="h-3 w-3" />}
             </button>
@@ -524,75 +675,71 @@ export function CallScreen({
         )}
       </div>
 
-      {/* Floating Control Island at Bottom */}
-      <div className="absolute bottom-4 inset-x-0 z-30 flex items-center justify-center p-3 pointer-events-none">
-        <div className="pointer-events-auto flex items-center gap-3 sm:gap-4 rounded-full border border-white/10 bg-slate-900/80 px-6 py-3 shadow-2xl backdrop-blur-2xl">
+      {/* Floating Control Dock at Bottom (iOS 26 Liquid Water-Morphism) */}
+      <div className="absolute bottom-4 inset-x-0 z-30 flex items-center justify-center p-3 pointer-events-none pb-safe">
+        <div className="pointer-events-auto flex items-center gap-3 sm:gap-4 rounded-full border border-white/20 bg-black/60 px-6 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.85),inset_0_1px_1px_rgba(255,255,255,0.25)] backdrop-blur-3xl">
           {/* Mute Mic */}
-          <Button
-            variant={isMuted ? 'destructive' : 'secondary'}
-            size="icon"
-            className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full shadow-lg transition-transform hover:scale-105 ${
-              isMuted ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30' : 'bg-slate-800 hover:bg-slate-700'
+          <button
+            className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full flex items-center justify-center transition-all active:scale-95 border ${
+              isMuted
+                ? 'bg-red-600/90 text-white border-white/20 shadow-[0_0_20px_rgba(239,68,68,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)]'
+                : 'bg-white/10 hover:bg-white/20 text-white border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)]'
             }`}
             onClick={onToggleMute}
             title={isMuted ? 'Unmute' : 'Mute'}
           >
             {isMuted ? <MicOff className="h-5 w-5 sm:h-6 sm:w-6" /> : <Mic className="h-5 w-5 sm:h-6 sm:w-6" />}
-          </Button>
+          </button>
 
           {/* Camera Toggle */}
           {isVideoCall && (
-            <Button
-              variant={isVideoOff ? 'destructive' : 'secondary'}
-              size="icon"
-              className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full shadow-lg transition-transform hover:scale-105 ${
-                isVideoOff ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30' : 'bg-slate-800 hover:bg-slate-700'
+            <button
+              className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full flex items-center justify-center transition-all active:scale-95 border ${
+                isVideoOff
+                  ? 'bg-red-600/90 text-white border-white/20 shadow-[0_0_20px_rgba(239,68,68,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)]'
+                  : 'bg-white/10 hover:bg-white/20 text-white border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)]'
               }`}
               onClick={onToggleVideo}
               title={isVideoOff ? 'Turn Camera On' : 'Turn Camera Off'}
             >
               {isVideoOff ? <VideoOff className="h-5 w-5 sm:h-6 sm:w-6" /> : <Video className="h-5 w-5 sm:h-6 sm:w-6" />}
-            </Button>
+            </button>
           )}
 
           {/* Switch Front/Rear Camera (Mobile) */}
           {isVideoCall && !isVideoOff && (
-            <Button
-              variant="secondary"
-              size="icon"
-              className="h-12 w-12 sm:h-14 sm:w-14 rounded-full bg-slate-800 hover:bg-slate-700 shadow-lg transition-transform hover:scale-105"
+            <button
+              className="h-12 w-12 sm:h-14 sm:w-14 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 text-white border border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)] transition-all active:scale-95"
               onClick={onSwitchCamera}
               title="Switch Camera (Front/Rear)"
             >
               <SwitchCamera className="h-5 w-5 sm:h-6 sm:w-6" />
-            </Button>
+            </button>
           )}
 
           {/* Screen Share (Desktop) */}
           {isVideoCall && (
-            <Button
-              variant={isScreenSharing ? 'default' : 'secondary'}
-              size="icon"
-              className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full shadow-lg hidden sm:inline-flex transition-transform hover:scale-105 ${
-                isScreenSharing ? 'bg-blue-600 hover:bg-blue-500' : 'bg-slate-800 hover:bg-slate-700'
+            <button
+              className={`h-12 w-12 sm:h-14 sm:w-14 rounded-full hidden sm:flex items-center justify-center transition-all active:scale-95 border ${
+                isScreenSharing
+                  ? 'bg-blue-600/90 text-white border-white/20 shadow-[0_0_20px_rgba(59,130,246,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)]'
+                  : 'bg-white/10 hover:bg-white/20 text-white border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)]'
               }`}
               onClick={onToggleScreenShare}
               title="Share Screen"
             >
               <Monitor className="h-5 w-5 sm:h-6 sm:w-6" />
-            </Button>
+            </button>
           )}
 
           {/* End Call Button */}
-          <Button
-            variant="destructive"
-            size="icon"
-            className="h-14 w-14 sm:h-16 sm:w-16 rounded-full bg-red-600 hover:bg-red-500 shadow-xl shadow-red-600/50 hover:scale-105 transition-transform"
+          <button
+            className="h-14 w-14 sm:h-16 sm:w-16 rounded-full flex items-center justify-center bg-red-600/90 hover:bg-red-500 text-white shadow-[0_8px_30px_rgba(239,68,68,0.6),inset_0_1px_1px_rgba(255,255,255,0.4)] border border-white/20 active:scale-95 transition-all"
             onClick={onEnd}
             title="End Call"
           >
-            <PhoneOff className="h-6 w-6 sm:h-7 sm:w-7 text-white" />
-          </Button>
+            <PhoneOff className="h-6 w-6 sm:h-7 sm:w-7" />
+          </button>
         </div>
       </div>
     </div>

@@ -258,6 +258,25 @@ export class SignalingGateway
     });
   }
 
+  @SubscribeMessage('call:control')
+  handleControl(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody()
+    data: {
+      toUserId: string;
+      payload: any;
+    },
+  ) {
+    const fromUserId = client.userId;
+    if (!fromUserId) return;
+
+    const { toUserId, payload } = data;
+    this.server.to(`user:${toUserId}`).emit('call:control', {
+      fromUserId,
+      payload,
+    });
+  }
+
   // --- Real-time Notifications for Friend Requests ---
 
   sendFriendRequestNotification(receiverId: string, sender: any) {

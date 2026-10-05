@@ -1,5 +1,5 @@
-const CACHE_NAME = 'cn-bd-connect-v1';
-const STATIC_ASSETS = ['/', '/manifest.json', '/icon.svg'];
+const CACHE_NAME = 'cn-bd-connect-v2';
+const STATIC_ASSETS = ['/', '/manifest.json', '/logo.png', '/favicon.ico'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
