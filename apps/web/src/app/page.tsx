@@ -40,6 +40,11 @@ import {
   PhoneCall,
   UserX,
   SlidersHorizontal,
+  PhoneIncoming,
+  PhoneOutgoing,
+  PhoneMissed,
+  PhoneOff,
+  History,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,7 +71,20 @@ interface FriendRequest {
   createdAt: string;
 }
 
-type TabType = 'friends' | 'telemetry' | 'settings' | 'profile';
+export interface CallRecord {
+  id: string;
+  callerId: string;
+  calleeId: string;
+  status: 'INITIATED' | 'CONNECTED' | 'ENDED' | 'MISSED' | 'DECLINED';
+  startedAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number;
+  createdAt: string;
+  caller: User;
+  callee: User;
+}
+
+type TabType = 'friends' | 'recents' | 'telemetry' | 'settings' | 'profile';
 
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -118,6 +136,11 @@ export default function App() {
   } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
+
+  // Call History & Recents State
+  const [callHistory, setCallHistory] = useState<CallRecord[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'missed'>('all');
 
   // Profile Form State
   const [profileName, setProfileName] = useState('');
@@ -276,16 +299,40 @@ export default function App() {
     disconnectSocket();
   };
 
-  // 2. Fetch Friends and Requests
+  const fetchCallHistory = useCallback(async (authToken?: string) => {
+    const t = authToken || token;
+    if (!t) return;
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetch('/api/proxy/calls/history?limit=50', {
+        headers: { Authorization: `Bearer ${t}` },
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.calls && Array.isArray(data.calls)) {
+          setCallHistory(data.calls);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load call history:', err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [token]);
+
+  // 2. Fetch Friends, Requests, and Call History
   const loadDashboardData = useCallback(async () => {
     if (!token) return;
     setIsRefreshing(true);
     try {
-      const [friendsRes, requestsRes] = await Promise.all([
+      const [friendsRes, requestsRes, historyRes] = await Promise.all([
         fetch('/api/proxy/friends', {
           headers: { Authorization: `Bearer ${token}` },
         }),
         fetch('/api/proxy/friends/requests', {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch('/api/proxy/calls/history?limit=50', {
           headers: { Authorization: `Bearer ${token}` },
         }),
       ]);
@@ -307,6 +354,12 @@ export default function App() {
         setIncomingRequests(incoming);
         setOutgoingRequests(outgoing);
       }
+      if (historyRes.ok) {
+        const histData = await historyRes.json().catch(() => null);
+        if (histData?.calls && Array.isArray(histData.calls)) {
+          setCallHistory(histData.calls);
+        }
+      }
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     } finally {
@@ -319,6 +372,13 @@ export default function App() {
       loadDashboardData();
     }
   }, [currentUser, token, loadDashboardData]);
+
+  // Auto-refresh call history when a call ends
+  useEffect(() => {
+    if (webrtc.callState === 'idle' && token) {
+      fetchCallHistory();
+    }
+  }, [webrtc.callState, token, fetchCallHistory]);
 
   // 3. Continuous Real-Time Latency Probe to Hong Kong Server (Every 3 seconds)
   useEffect(() => {
@@ -872,6 +932,10 @@ export default function App() {
         networkStats={webrtc.networkStats}
         isPeerMuted={webrtc.isPeerMuted}
         isPeerVideoOff={webrtc.isPeerVideoOff}
+        chatMessages={webrtc.chatMessages}
+        fileTransfers={webrtc.fileTransfers}
+        isVoiceClarityEnabled={webrtc.isVoiceClarityEnabled}
+        isBackgroundBlurEnabled={webrtc.isBackgroundBlurEnabled}
         onAnswer={webrtc.answerCall}
         onReject={webrtc.rejectCall}
         onEnd={webrtc.callState === 'calling' ? webrtc.cancelCall : webrtc.endCall}
@@ -879,6 +943,10 @@ export default function App() {
         onToggleVideo={webrtc.toggleVideo}
         onSwitchCamera={webrtc.switchCamera}
         onToggleScreenShare={webrtc.toggleScreenShare}
+        onSendChatMessage={webrtc.sendChatMessage}
+        onSendFile={webrtc.sendFile}
+        onToggleVoiceClarity={webrtc.toggleVoiceClarity}
+        onToggleBackgroundBlur={webrtc.toggleBackgroundBlur}
       />
 
       {/* Floating Action Banner Notification Toast */}
@@ -944,6 +1012,20 @@ export default function App() {
                   {incomingRequests.length}
                 </span>
               )}
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('recents');
+                fetchCallHistory();
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                activeTab === 'recents'
+                  ? 'bg-blue-600 text-white shadow-md'
+                  : 'text-white/70 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <Clock className="h-3.5 w-3.5" />
+              Recents
             </button>
             <button
               onClick={() => setActiveTab('telemetry')}
@@ -1295,7 +1377,220 @@ export default function App() {
           </div>
         )}
 
-        {/* --- TAB 2: TELEMETRY & NETWORK PIPELINE --- */}
+        {/* --- TAB 2: RECENTS & CALL HISTORY --- */}
+        {activeTab === 'recents' && (
+          <div className="space-y-6">
+            {/* Call History Header Card */}
+            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 shadow-[inset_0_1px_1px_rgba(255,255,255,0.15)] backdrop-blur-3xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <History className="h-5 w-5 text-blue-400" />
+                    <h3 className="text-lg font-bold text-white tracking-tight">Call History & Missed Logs</h3>
+                  </div>
+                  <p className="text-xs text-white/50">
+                    Real-time logs stored securely on PostgreSQL with instant one-tap redial
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Filter All vs Missed */}
+                  <div className="flex items-center bg-white/5 p-1 rounded-2xl border border-white/10 text-xs">
+                    <button
+                      onClick={() => setHistoryFilter('all')}
+                      className={`px-3 py-1.5 rounded-xl font-medium transition-all ${
+                        historyFilter === 'all'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-white/60 hover:text-white'
+                      }`}
+                    >
+                      All ({callHistory.length})
+                    </button>
+                    <button
+                      onClick={() => setHistoryFilter('missed')}
+                      className={`px-3 py-1.5 rounded-xl font-medium transition-all ${
+                        historyFilter === 'missed'
+                          ? 'bg-red-600 text-white shadow-sm'
+                          : 'text-white/60 hover:text-white'
+                      }`}
+                    >
+                      Missed ({callHistory.filter((c) => c.status === 'MISSED').length})
+                    </button>
+                  </div>
+
+                  <Button
+                    onClick={() => fetchCallHistory()}
+                    disabled={isLoadingHistory}
+                    variant="outline"
+                    className="h-9 px-3 bg-white/5 hover:bg-white/10 text-white rounded-xl border border-white/15 text-xs"
+                    title="Refresh Logs"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${isLoadingHistory ? 'animate-spin' : ''}`} />
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {/* Call History List */}
+            {isLoadingHistory && callHistory.length === 0 ? (
+              <div className="py-20 text-center text-white/50 space-y-3">
+                <RefreshCw className="h-8 w-8 animate-spin mx-auto text-blue-400" />
+                <p className="text-sm">Loading call history...</p>
+              </div>
+            ) : (() => {
+              const filteredCalls = callHistory.filter((c) =>
+                historyFilter === 'missed' ? c.status === 'MISSED' : true,
+              );
+
+              if (filteredCalls.length === 0) {
+                return (
+                  <div className="rounded-3xl border border-white/10 bg-black/40 p-12 text-center text-white/50 backdrop-blur-3xl space-y-3">
+                    <Clock className="h-12 w-12 mx-auto text-white/20" />
+                    <h4 className="text-sm font-semibold text-white/80">
+                      {historyFilter === 'missed' ? 'No missed calls' : 'No call history recorded yet'}
+                    </h4>
+                    <p className="text-xs text-white/40 max-w-sm mx-auto">
+                      Whenever someone calls you or you make a call, the session and duration will be logged here with instant redial.
+                    </p>
+                  </div>
+                );
+              }
+
+              const formatCallDuration = (sec: number) => {
+                if (!sec || sec <= 0) return '0s';
+                const m = Math.floor(sec / 60);
+                const s = sec % 60;
+                if (m === 0) return `${s}s`;
+                return `${m}m ${s.toString().padStart(2, '0')}s`;
+              };
+
+              const formatCallDate = (isoStr: string) => {
+                try {
+                  const d = new Date(isoStr);
+                  const now = new Date();
+                  const isToday = d.toDateString() === now.toDateString();
+                  if (isToday) {
+                    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                  }
+                  return d.toLocaleDateString([], {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  });
+                } catch {
+                  return isoStr;
+                }
+              };
+
+              return (
+                <div className="space-y-3">
+                  {filteredCalls.map((call) => {
+                    const isOutgoing = call.callerId === currentUser?.id;
+                    const peer = isOutgoing ? call.callee : call.caller;
+                    const isMissed = call.status === 'MISSED';
+                    const isDeclined = call.status === 'DECLINED';
+
+                    return (
+                      <div
+                        key={call.id}
+                        className={`group relative rounded-2xl border p-4 transition-all backdrop-blur-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                          isMissed
+                            ? 'bg-red-950/15 border-red-500/20 hover:border-red-500/40'
+                            : 'bg-black/60 border-white/10 hover:border-white/20'
+                        }`}
+                      >
+                        {/* Peer Info & Call Status */}
+                        <div className="flex items-center gap-3.5 min-w-0">
+                          {/* Avatar Emblem */}
+                          <div
+                            className={`h-12 w-12 rounded-2xl flex items-center justify-center font-bold text-base border shrink-0 ${
+                              isMissed
+                                ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                                : isOutgoing
+                                  ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
+                                  : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                            }`}
+                          >
+                            {peer?.name?.charAt(0) || 'U'}
+                          </div>
+
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h4
+                                className={`font-semibold text-sm truncate ${
+                                  isMissed ? 'text-red-400' : 'text-white'
+                                }`}
+                              >
+                                {peer?.name || 'Unknown User'}
+                              </h4>
+                              <span className="text-xs shrink-0">
+                                {peer?.country === 'BD' ? '🇧🇩' : '🇨🇳'}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2 text-xs text-white/50 mt-0.5">
+                              {/* Direction / Status Icon */}
+                              {isMissed ? (
+                                <span className="inline-flex items-center gap-1 text-red-400 font-medium">
+                                  <PhoneMissed className="h-3 w-3" />
+                                  Missed Call
+                                </span>
+                              ) : isDeclined ? (
+                                <span className="inline-flex items-center gap-1 text-amber-400 font-medium">
+                                  <PhoneOff className="h-3 w-3" />
+                                  Declined
+                                </span>
+                              ) : isOutgoing ? (
+                                <span className="inline-flex items-center gap-1 text-blue-400 font-medium">
+                                  <PhoneOutgoing className="h-3 w-3" />
+                                  Outgoing ({formatCallDuration(call.durationSeconds)})
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
+                                  <PhoneIncoming className="h-3 w-3" />
+                                  Incoming ({formatCallDuration(call.durationSeconds)})
+                                </span>
+                              )}
+
+                              <span>•</span>
+                              <span className="font-mono text-[11px] text-white/40">
+                                {formatCallDate(call.createdAt)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* One-Tap Redial Buttons */}
+                        <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                          <Button
+                            onClick={() => webrtc.startCall(peer, true)}
+                            size="sm"
+                            className="h-9 px-3.5 bg-blue-600/90 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-[0_4px_12px_rgba(59,130,246,0.3)] border border-white/20 active:scale-95 transition-all"
+                          >
+                            <Video className="h-3.5 w-3.5" />
+                            Redial HD
+                          </Button>
+                          <Button
+                            onClick={() => webrtc.startCall(peer, false)}
+                            variant="outline"
+                            size="sm"
+                            className="h-9 px-3.5 bg-white/5 hover:bg-white/10 text-white/90 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-white/15 active:scale-95 transition-all"
+                          >
+                            <Phone className="h-3.5 w-3.5" />
+                            Voice
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* --- TAB 3: TELEMETRY & NETWORK PIPELINE --- */}
         {activeTab === 'telemetry' && (
           <div className="space-y-6">
             {/* Cross-Border Telemetry Banner */}
@@ -1734,6 +2029,19 @@ export default function App() {
             )}
           </div>
           <span className="text-[10px] font-semibold mt-1">Friends</span>
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveTab('recents');
+            fetchCallHistory();
+          }}
+          className={`flex flex-col items-center justify-center flex-1 h-full rounded-2xl transition-all ${
+            activeTab === 'recents' ? 'text-blue-400 scale-105' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          <Clock className="h-5 w-5" />
+          <span className="text-[10px] font-semibold mt-1">Recents</span>
         </button>
 
         <button

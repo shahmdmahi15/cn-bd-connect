@@ -12,6 +12,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { CallsService } from '../calls/calls.service.js';
 import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
@@ -61,6 +62,8 @@ export class SignalingGateway
   private userSockets = new Map<string, Set<string>>();
   // Active call map: userId -> currentCallWithUserId
   private activeCalls = new Map<string, string>();
+  // Active call sessions: userId -> callId
+  private activeCallSessions = new Map<string, string>();
   // Pending calls waiting for answer (calleeId -> session)
   private pendingCalls = new Map<string, PendingCallSession>();
   // Reverse index (callerId -> calleeId)
@@ -71,6 +74,7 @@ export class SignalingGateway
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
+    private readonly callsService: CallsService,
   ) {}
 
   // Real-time ping probe for live latency measurement (Dhaka <-> HK <-> China)
@@ -154,11 +158,25 @@ export class SignalingGateway
       if (sockets.size === 0) {
         this.userSockets.delete(userId);
 
-        // If user was in an active call, end it automatically
+        // If user was in an active call, end it and update database
         const peerId = this.activeCalls.get(userId);
         if (peerId) {
           this.activeCalls.delete(userId);
           this.activeCalls.delete(peerId);
+
+          const callId =
+            this.activeCallSessions.get(userId) ||
+            this.activeCallSessions.get(peerId);
+          if (callId) {
+            this.activeCallSessions.delete(userId);
+            this.activeCallSessions.delete(peerId);
+            await this.callsService
+              .markCallEnded(callId)
+              .catch((err) =>
+                this.logger.warn(`Failed to mark call ended on disconnect: ${err.message}`),
+              );
+          }
+
           this.server.to(`user:${peerId}`).emit('call:ended', { fromUserId: userId });
         }
 
@@ -170,8 +188,30 @@ export class SignalingGateway
             clearTimeout(pending.timer);
             this.pendingCalls.delete(pendingCalleeId);
             this.callerToPending.delete(userId);
+            await this.callsService
+              .markCallMissed(pending.callId)
+              .catch((err) =>
+                this.logger.warn(`Failed to mark call missed on disconnect: ${err.message}`),
+              );
             this.server.to(`user:${pendingCalleeId}`).emit('call:cancelled', { fromUserId: userId });
           }
+        }
+
+        // If user was callee with a pending call, clean up and notify caller
+        const pendingAsCallee = this.pendingCalls.get(userId);
+        if (pendingAsCallee) {
+          clearTimeout(pendingAsCallee.timer);
+          this.pendingCalls.delete(userId);
+          this.callerToPending.delete(pendingAsCallee.callerId);
+          await this.callsService
+            .markCallMissed(pendingAsCallee.callId)
+            .catch((err) =>
+              this.logger.warn(`Failed to mark call missed on callee disconnect: ${err.message}`),
+            );
+          this.server.to(`user:${pendingAsCallee.callerId}`).emit('call:rejected', {
+            fromUserId: userId,
+            reason: 'User disconnected',
+          });
         }
 
         // Update database offline status
@@ -252,11 +292,27 @@ export class SignalingGateway
       country: client.userPayload.country,
     };
 
+    // Persist CallSession in PostgreSQL database
+    await this.callsService
+      .createCallSession({
+        id: callId,
+        callerId,
+        calleeId: toUserId,
+      })
+      .catch((err) =>
+        this.logger.warn(`Failed to persist call session in database: ${err.message}`),
+      );
+
     // 45-second timeout for unanswered calls
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       this.logger.log(`Call ${callId} timed out after 45s (Caller: ${callerId}, Callee: ${toUserId})`);
       this.pendingCalls.delete(toUserId);
       this.callerToPending.delete(callerId);
+      await this.callsService
+        .markCallMissed(callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call missed on timeout: ${err.message}`),
+        );
       this.server.to(`user:${callerId}`).emit('call:timeout', { toUserId, callId });
       this.server.to(`user:${toUserId}`).emit('call:timeout', { fromUserId: callerId, callId });
     }, 45000);
@@ -317,7 +373,7 @@ export class SignalingGateway
   }
 
   @SubscribeMessage('call:cancel')
-  handleCallCancel(
+  async handleCallCancel(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { toUserId: string },
   ) {
@@ -328,15 +384,23 @@ export class SignalingGateway
     const pending = this.pendingCalls.get(toUserId);
     if (pending && pending.callerId === callerId) {
       clearTimeout(pending.timer);
+      const callId = pending.callId;
       this.pendingCalls.delete(toUserId);
       this.callerToPending.delete(callerId);
+
+      await this.callsService
+        .markCallMissed(callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call missed on cancel: ${err.message}`),
+        );
+
       this.logger.log(`Call cancelled by caller ${callerId} for callee ${toUserId}`);
       this.server.to(`user:${toUserId}`).emit('call:cancelled', { fromUserId: callerId });
     }
   }
 
   @SubscribeMessage('call:accept')
-  handleCallAccept(
+  async handleCallAccept(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -351,8 +415,10 @@ export class SignalingGateway
 
     // Clear pending call timer & entries
     const pending = this.pendingCalls.get(calleeId);
+    let callId: string | undefined;
     if (pending) {
       clearTimeout(pending.timer);
+      callId = pending.callId;
       this.pendingCalls.delete(calleeId);
       this.callerToPending.delete(pending.callerId);
     }
@@ -361,17 +427,28 @@ export class SignalingGateway
     this.activeCalls.set(calleeId, toUserId);
     this.activeCalls.set(toUserId, calleeId);
 
+    if (callId) {
+      this.activeCallSessions.set(calleeId, callId);
+      this.activeCallSessions.set(toUserId, callId);
+      await this.callsService
+        .markCallConnected(callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call connected: ${err.message}`),
+        );
+    }
+
     this.logger.log(`Call accepted by ${calleeId} with ${toUserId}`);
 
     // Send answer back to caller
     this.server.to(`user:${toUserId}`).emit('call:accepted', {
       fromUserId: calleeId,
       answer,
+      callId,
     });
   }
 
   @SubscribeMessage('call:reject')
-  handleCallReject(
+  async handleCallReject(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody()
     data: {
@@ -388,8 +465,14 @@ export class SignalingGateway
     const pending = this.pendingCalls.get(calleeId);
     if (pending) {
       clearTimeout(pending.timer);
+      const callId = pending.callId;
       this.pendingCalls.delete(calleeId);
       this.callerToPending.delete(pending.callerId);
+      await this.callsService
+        .markCallDeclined(callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call declined: ${err.message}`),
+        );
     }
 
     this.logger.log(`Call rejected by ${calleeId} for ${toUserId}`);
@@ -401,7 +484,7 @@ export class SignalingGateway
   }
 
   @SubscribeMessage('call:end')
-  handleCallEnd(
+  async handleCallEnd(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { toUserId: string },
   ) {
@@ -416,13 +499,36 @@ export class SignalingGateway
       clearTimeout(pendingAsCallee.timer);
       this.pendingCalls.delete(userId);
       this.callerToPending.delete(pendingAsCallee.callerId);
+      await this.callsService
+        .markCallMissed(pendingAsCallee.callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call missed: ${err.message}`),
+        );
     }
     const pendingAsCaller = this.pendingCalls.get(toUserId);
     if (pendingAsCaller && pendingAsCaller.callerId === userId) {
       clearTimeout(pendingAsCaller.timer);
       this.pendingCalls.delete(toUserId);
       this.callerToPending.delete(userId);
+      await this.callsService
+        .markCallMissed(pendingAsCaller.callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call missed: ${err.message}`),
+        );
       this.server.to(`user:${toUserId}`).emit('call:cancelled', { fromUserId: userId });
+    }
+
+    const callId =
+      this.activeCallSessions.get(userId) ||
+      this.activeCallSessions.get(toUserId);
+    if (callId) {
+      this.activeCallSessions.delete(userId);
+      this.activeCallSessions.delete(toUserId);
+      await this.callsService
+        .markCallEnded(callId)
+        .catch((err) =>
+          this.logger.warn(`Failed to mark call ended: ${err.message}`),
+        );
     }
 
     this.activeCalls.delete(userId);

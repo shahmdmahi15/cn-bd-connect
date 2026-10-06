@@ -23,10 +23,18 @@ import {
   Radio,
   ArrowUpDown,
   PictureInPicture2,
+  MessageSquare,
+  Paperclip,
+  Send,
+  Sparkles,
+  Download,
+  File,
+  Sliders,
+  X as CloseIcon,
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import type { PeerUser, NetworkStats } from '@/hooks/useWebRTC';
+import type { PeerUser, NetworkStats, ChatMessage, FileTransferProgress } from '@/hooks/useWebRTC';
 
 export interface CallScreenProps {
   callState: 'idle' | 'calling' | 'incoming' | 'connected' | 'ended';
@@ -40,6 +48,10 @@ export interface CallScreenProps {
   networkStats: NetworkStats | null;
   isPeerMuted?: boolean;
   isPeerVideoOff?: boolean;
+  chatMessages?: ChatMessage[];
+  fileTransfers?: Record<string, FileTransferProgress>;
+  isVoiceClarityEnabled?: boolean;
+  isBackgroundBlurEnabled?: boolean;
   onAnswer: () => void;
   onReject: () => void;
   onEnd: () => void;
@@ -47,6 +59,10 @@ export interface CallScreenProps {
   onToggleVideo: () => void;
   onSwitchCamera: () => void;
   onToggleScreenShare: () => void;
+  onSendChatMessage?: (text: string) => void;
+  onSendFile?: (file: File) => void;
+  onToggleVoiceClarity?: () => void;
+  onToggleBackgroundBlur?: () => void;
 }
 
 export function CallScreen({
@@ -61,6 +77,10 @@ export function CallScreen({
   networkStats,
   isPeerMuted = false,
   isPeerVideoOff = false,
+  chatMessages = [],
+  fileTransfers = {},
+  isVoiceClarityEnabled = true,
+  isBackgroundBlurEnabled = false,
   onAnswer,
   onReject,
   onEnd,
@@ -68,6 +88,10 @@ export function CallScreen({
   onToggleVideo,
   onSwitchCamera,
   onToggleScreenShare,
+  onSendChatMessage,
+  onSendFile,
+  onToggleVoiceClarity,
+  onToggleBackgroundBlur,
 }: CallScreenProps) {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -88,6 +112,50 @@ export function CallScreen({
   // 'contain' keeps mobile 9:16 stream uncropped on desktop 16:9, with ambient blurred glow.
   // 'cover' zooms to fill screen.
   const [videoFitMode, setVideoFitMode] = useState<'contain' | 'cover'>('contain');
+
+  // In-Call Chat & Instant File Sharing State
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatInputText, setChatInputText] = useState('');
+  const [unreadCount, setUnreadCount] = useState(0);
+  const prevMessagesLengthRef = useRef(0);
+  const chatMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const total = chatMessages?.length || 0;
+    if (total > prevMessagesLengthRef.current) {
+      if (!isChatOpen) {
+        setUnreadCount((c) => c + (total - prevMessagesLengthRef.current));
+      }
+      prevMessagesLengthRef.current = total;
+    }
+  }, [chatMessages, isChatOpen]);
+
+  const openChat = () => {
+    setIsChatOpen(true);
+    setUnreadCount(0);
+  };
+
+  useEffect(() => {
+    if (isChatOpen) {
+      chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, isChatOpen]);
+
+  const handleSendMessage = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!chatInputText.trim() || !onSendChatMessage) return;
+    onSendChatMessage(chatInputText.trim());
+    setChatInputText('');
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onSendFile) {
+      onSendFile(file);
+      e.target.value = '';
+    }
+  };
 
   // Initialize or resume Web Audio API pipeline
   const initWebAudioPipeline = useCallback((stream: MediaStream) => {
@@ -345,6 +413,49 @@ export function CallScreen({
       console.warn('[CallScreen] Picture-in-Picture toggle notice:', err);
     }
   };
+
+  // Auto Picture-in-Picture on multitasking / tab backgrounding / home gesture
+  useEffect(() => {
+    if (callState !== 'connected' || !isVideoCall) return;
+
+    const handleVisibilityChange = async () => {
+      try {
+        const doc: any = document;
+        if (doc.hidden) {
+          if (!doc.pictureInPictureElement && remoteVideoRef.current) {
+            if (remoteVideoRef.current.requestPictureInPicture) {
+              await remoteVideoRef.current.requestPictureInPicture();
+              setIsNativePiPActive(true);
+            } else if ((remoteVideoRef.current as any).webkitSetPresentationMode) {
+              (remoteVideoRef.current as any).webkitSetPresentationMode('picture-in-picture');
+              setIsNativePiPActive(true);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[CallScreen] Auto-PiP notice:', err);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [callState, isVideoCall]);
+
+  // Keep PiP active state accurate with browser native PiP window events
+  useEffect(() => {
+    const video = remoteVideoRef.current;
+    if (!video) return;
+    const handleEnter = () => setIsNativePiPActive(true);
+    const handleLeave = () => setIsNativePiPActive(false);
+    video.addEventListener('enterpictureinpicture', handleEnter);
+    video.addEventListener('leavepictureinpicture', handleLeave);
+    return () => {
+      video.removeEventListener('enterpictureinpicture', handleEnter);
+      video.removeEventListener('leavepictureinpicture', handleLeave);
+    };
+  }, [callState]);
 
   // Desktop & Laptop Keyboard Shortcuts (Space/M to Mute, V for Video, F for Fullscreen, P for PiP)
   useEffect(() => {
@@ -610,6 +721,48 @@ export function CallScreen({
                   <span className="text-[10px] text-white/80 hidden sm:inline">Fill (Zoom)</span>
                 </>
               )}
+            </button>
+          )}
+
+          {/* Studio Voice Clarity Equalizer Toggle */}
+          {onToggleVoiceClarity && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleVoiceClarity();
+              }}
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-mono backdrop-blur-xl transition-all shadow-lg ${
+                isVoiceClarityEnabled
+                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                  : 'bg-black/60 border-white/15 text-white/50 hover:text-white'
+              }`}
+              title={
+                isVoiceClarityEnabled
+                  ? 'Voice Clarity Active: 80Hz Cut + 2.5kHz Vocal Boost + Compression'
+                  : 'Voice Clarity Off (Flat Bypass)'
+              }
+            >
+              <Sparkles className={`h-3.5 w-3.5 ${isVoiceClarityEnabled ? 'text-emerald-400' : 'text-white/40'}`} />
+              <span className="text-[10px] hidden sm:inline">Clarity</span>
+            </button>
+          )}
+
+          {/* AI / Canvas Background Blur Toggle */}
+          {isVideoCall && onToggleBackgroundBlur && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleBackgroundBlur();
+              }}
+              className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-mono backdrop-blur-xl transition-all shadow-lg ${
+                isBackgroundBlurEnabled
+                  ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
+                  : 'bg-black/60 border-white/15 text-white/50 hover:text-white'
+              }`}
+              title={isBackgroundBlurEnabled ? 'Background Blur Active' : 'Background Blur Off'}
+            >
+              <Sliders className={`h-3.5 w-3.5 ${isBackgroundBlurEnabled ? 'text-blue-400' : 'text-white/40'}`} />
+              <span className="text-[10px] hidden sm:inline">Blur</span>
             </button>
           )}
 
@@ -984,6 +1137,26 @@ export function CallScreen({
             </button>
           )}
 
+          {/* In-Call P2P Chat & File Sharing Toggle Button */}
+          {onSendChatMessage && (
+            <button
+              className={`relative h-12 w-12 sm:h-14 sm:w-14 rounded-full flex items-center justify-center transition-all active:scale-95 border ${
+                isChatOpen
+                  ? 'bg-blue-600/90 text-white border-white/20 shadow-[0_0_20px_rgba(59,130,246,0.5),inset_0_1px_1px_rgba(255,255,255,0.3)]'
+                  : 'bg-white/10 hover:bg-white/20 text-white border-white/15 shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)]'
+              }`}
+              onClick={() => (isChatOpen ? setIsChatOpen(false) : openChat())}
+              title="In-Call P2P Chat & File Sharing"
+            >
+              <MessageSquare className="h-5 w-5 sm:h-6 sm:w-6" />
+              {unreadCount > 0 && !isChatOpen && (
+                <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white border-2 border-black animate-pulse">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+          )}
+
           {/* End Call Button */}
           <button
             className="h-14 w-14 sm:h-16 sm:w-16 rounded-full flex items-center justify-center bg-red-600/90 hover:bg-red-500 text-white shadow-[0_8px_30px_rgba(239,68,68,0.6),inset_0_1px_1px_rgba(255,255,255,0.4)] border border-white/20 active:scale-95 transition-all"
@@ -994,6 +1167,157 @@ export function CallScreen({
           </button>
         </div>
       </div>
+
+      {/* In-Call P2P Chat & Instant File Sharing Drawer (Liquid Water-Morphism) */}
+      {isChatOpen && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute inset-y-0 right-0 z-40 w-full sm:w-96 flex flex-col bg-black/95 border-l border-white/20 backdrop-blur-3xl shadow-[0_0_60px_rgba(0,0,0,0.95)] animate-in slide-in-from-right duration-300"
+        >
+          {/* Chat Header */}
+          <div className="flex items-center justify-between p-4 border-b border-white/10 bg-white/5">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="h-4 w-4 text-blue-400" />
+              <span className="font-semibold text-sm text-white">In-Call Chat & Files</span>
+              <Badge variant="outline" className="text-[10px] bg-blue-500/10 border-blue-500/30 text-blue-300">
+                P2P Encrypted
+              </Badge>
+            </div>
+            <button
+              onClick={() => setIsChatOpen(false)}
+              className="p-1.5 rounded-full text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+            >
+              <CloseIcon className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Active File Transfers Progress Bar */}
+          {Object.values(fileTransfers).length > 0 && (
+            <div className="p-3 border-b border-white/10 bg-white/[0.03] space-y-2 max-h-36 overflow-y-auto">
+              <span className="text-[10px] uppercase font-bold text-white/40 tracking-wider">File Transfers</span>
+              {Object.values(fileTransfers).map((ft) => (
+                <div key={ft.fileId} className="bg-black/60 border border-white/10 rounded-xl p-2 text-xs">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-white/80 font-medium truncate max-w-[180px]">{ft.fileName}</span>
+                    <span className="text-white/50 text-[10px]">
+                      {ft.status === 'completed' ? 'Done' : `${ft.progress}%`}
+                    </span>
+                  </div>
+                  <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-300 ${
+                        ft.status === 'completed' ? 'bg-emerald-400' : 'bg-blue-500'
+                      }`}
+                      style={{ width: `${ft.progress}%` }}
+                    />
+                  </div>
+                  {ft.url && (
+                    <a
+                      href={ft.url}
+                      download={ft.fileName}
+                      className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 font-medium"
+                    >
+                      <Download className="h-3 w-3" /> Download {ft.fileName}
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Message List */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {chatMessages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center text-white/40 p-4">
+                <MessageSquare className="h-10 w-10 mb-2 opacity-30" />
+                <p className="text-xs">No messages yet in this call.</p>
+                <p className="text-[10px] text-white/30 mt-1">
+                  Send instant text messages or share files peer-to-peer without server storage.
+                </p>
+              </div>
+            ) : (
+              chatMessages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex flex-col ${msg.isSelf ? 'items-end' : 'items-start'}`}
+                >
+                  <span className="text-[10px] text-white/40 px-1 mb-0.5">
+                    {msg.isSelf ? 'You' : msg.senderName}
+                  </span>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-3.5 py-2 text-xs break-words shadow-lg border ${
+                      msg.isSelf
+                        ? 'bg-blue-600/80 text-white border-blue-400/30'
+                        : 'bg-white/10 text-white/90 border-white/15'
+                    }`}
+                  >
+                    {msg.file ? (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <File className="h-4 w-4 shrink-0 text-blue-300" />
+                          <div className="truncate">
+                            <span className="font-semibold block truncate">{msg.file.fileName}</span>
+                            <span className="text-[10px] opacity-75 font-mono">
+                              {(msg.file.fileSize / 1024).toFixed(1)} KB
+                            </span>
+                          </div>
+                        </div>
+                        {msg.file.url && (
+                          <a
+                            href={msg.file.url}
+                            download={msg.file.fileName}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/40 hover:bg-black/60 text-[11px] font-medium border border-white/20 transition-colors"
+                          >
+                            <Download className="h-3 w-3" /> Download
+                          </a>
+                        )}
+                      </div>
+                    ) : (
+                      <span>{msg.text}</span>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={chatMessagesEndRef} />
+          </div>
+
+          {/* Chat Input Row */}
+          <form
+            onSubmit={handleSendMessage}
+            className="p-3 border-t border-white/10 bg-white/5 flex items-center gap-2"
+          >
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white/80 hover:text-white border border-white/10 transition-colors"
+              title="Attach File (P2P Transfer)"
+            >
+              <Paperclip className="h-4 w-4" />
+            </button>
+            <input
+              type="text"
+              value={chatInputText}
+              onChange={(e) => setChatInputText(e.target.value)}
+              placeholder="Type message..."
+              className="flex-1 bg-black/50 border border-white/15 rounded-xl px-3 py-2 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-blue-500"
+            />
+            <button
+              type="submit"
+              disabled={!chatInputText.trim()}
+              className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-medium border border-white/20 transition-all active:scale-95"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

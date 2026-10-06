@@ -2,9 +2,10 @@ import { Module } from '@nestjs/common';
 import { SignalingGateway } from './signaling.gateway.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { NotificationsModule } from '../notifications/notifications.module.js';
+import { CallsModule } from '../calls/calls.module.js';
 
 @Module({
-  imports: [AuthModule, NotificationsModule],
+  imports: [AuthModule, NotificationsModule, CallsModule],
   providers: [SignalingGateway],
   exports: [SignalingGateway],
 })

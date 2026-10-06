@@ -4,6 +4,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { FriendsModule } from './friends/friends.module.js';
 import { TurnModule } from './turn/turn.module.js';
+import { CallsModule } from './calls/calls.module.js';
 import { SignalingModule } from './signaling/signaling.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { AppController } from './app.controller.js';
@@ -19,6 +20,7 @@ import { AppService } from './app.service.js';
     AuthModule,
     FriendsModule,
     TurnModule,
+    CallsModule,
     SignalingModule,
     NotificationsModule,
   ],

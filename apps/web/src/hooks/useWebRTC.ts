@@ -10,6 +10,32 @@ export interface PeerUser {
   country: string;
 }
 
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  timestamp: number;
+  isSelf: boolean;
+  file?: {
+    fileId: string;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+    url?: string;
+  };
+}
+
+export interface FileTransferProgress {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  fileType: string;
+  progress: number; // 0 - 100
+  status: 'uploading' | 'downloading' | 'completed' | 'error';
+  url?: string;
+}
+
 export interface NetworkStats {
   rttMs: number;
   bitrateKbps: number;
@@ -183,6 +209,11 @@ export function useWebRTC(
   const [isScreenSharing, setIsScreenSharing] = useState<boolean>(false);
   const [networkStats, setNetworkStats] = useState<NetworkStats | null>(null);
 
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [fileTransfers, setFileTransfers] = useState<Record<string, FileTransferProgress>>({});
+  const [isVoiceClarityEnabled, setIsVoiceClarityEnabled] = useState<boolean>(true);
+  const [isBackgroundBlurEnabled, setIsBackgroundBlurEnabled] = useState<boolean>(false);
+
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
@@ -192,7 +223,34 @@ export function useWebRTC(
   const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const prevBytesReceivedRef = useRef<number>(0);
   const prevTimestampRef = useRef<number>(0);
+  const prevPacketsLostRef = useRef<number>(0);
+  const prevPacketsReceivedRef = useRef<number>(0);
   const facingModeRef = useRef<'user' | 'environment'>('user');
+
+  // Buffer for incoming file chunks: fileId -> { fileName, fileSize, fileType, totalChunks, chunks: string[] }
+  const incomingFilesRef = useRef<
+    Map<
+      string,
+      {
+        fileName: string;
+        fileSize: number;
+        fileType: string;
+        totalChunks: number;
+        chunks: string[];
+      }
+    >
+  >(new Map());
+
+  // Web Audio Voice Clarity DSP Equalizer Chain
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const voiceClaritySourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const voiceClarityHighpassRef = useRef<BiquadFilterNode | null>(null);
+  const voiceClarityPeakingRef = useRef<BiquadFilterNode | null>(null);
+  const voiceClarityCompressorRef = useRef<DynamicsCompressorNode | null>(null);
+
+  // Background Voice Call Keep-Alive Node (Prevents iOS/Android audio suspension)
+  const keepAliveOscRef = useRef<OscillatorNode | null>(null);
+  const keepAliveGainRef = useRef<GainNode | null>(null);
 
   const qualityPreference = options?.qualityPreference || 'auto';
   const qualityPreferenceRef = useRef(qualityPreference);
@@ -309,6 +367,283 @@ export function useWebRTC(
       wakeLockRef.current = null;
     }
   }, []);
+
+  // 1. Voice Call Keep-Alive: Web Audio Sub-Bass Oscillator + WakeLock keepalive
+  const startKeepAlive = useCallback(() => {
+    try {
+      acquireWakeLock();
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      if (!keepAliveOscRef.current) {
+        // Continuous inaudible 1Hz sub-bass sine tone at 0.00001 gain
+        // Keeps iOS/Android WebKit media session alive during screen sleep & backgrounding
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1, ctx.currentTime);
+        gain.gain.setValueAtTime(0.00001, ctx.currentTime);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        keepAliveOscRef.current = osc;
+        keepAliveGainRef.current = gain;
+      }
+    } catch (err) {
+      console.warn('[WebRTC Keep-Alive] Notice:', err);
+    }
+  }, [acquireWakeLock]);
+
+  const stopKeepAlive = useCallback(() => {
+    releaseWakeLock();
+    if (keepAliveOscRef.current) {
+      try {
+        keepAliveOscRef.current.stop();
+        keepAliveOscRef.current.disconnect();
+      } catch {}
+      keepAliveOscRef.current = null;
+    }
+    if (keepAliveGainRef.current) {
+      try {
+        keepAliveGainRef.current.disconnect();
+      } catch {}
+      keepAliveGainRef.current = null;
+    }
+  }, [releaseWakeLock]);
+
+  // 2. Web Audio Voice Clarity DSP Filter: 80Hz Butterworth High-Pass + 2.5kHz Voice Boost + Compressor
+  const initVoiceClarityFilter = useCallback((stream: MediaStream) => {
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioCtx();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) return;
+
+      if (voiceClaritySourceRef.current) {
+        try {
+          voiceClaritySourceRef.current.disconnect();
+        } catch {}
+      }
+
+      const source = ctx.createMediaStreamSource(stream);
+      voiceClaritySourceRef.current = source;
+
+      // 80Hz High-Pass Filter: Eliminates rumble, AC fan noise, desk vibrations
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = 'highpass';
+      highpass.frequency.setValueAtTime(80, ctx.currentTime);
+      highpass.Q.setValueAtTime(0.707, ctx.currentTime);
+      voiceClarityHighpassRef.current = highpass;
+
+      // 2.5kHz Peaking Filter: Boosts speech intelligibility and voice presence (+4.5 dB)
+      const peaking = ctx.createBiquadFilter();
+      peaking.type = 'peaking';
+      peaking.frequency.setValueAtTime(2500, ctx.currentTime);
+      peaking.Q.setValueAtTime(1.2, ctx.currentTime);
+      peaking.gain.setValueAtTime(4.5, ctx.currentTime);
+      voiceClarityPeakingRef.current = peaking;
+
+      // Dynamics Compressor: Balances soft whispers and loud laughter
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-24, ctx.currentTime);
+      compressor.knee.setValueAtTime(30, ctx.currentTime);
+      compressor.ratio.setValueAtTime(4, ctx.currentTime);
+      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
+      compressor.release.setValueAtTime(0.25, ctx.currentTime);
+      voiceClarityCompressorRef.current = compressor;
+
+      // Chain: Source -> Highpass -> Peaking Boost -> Compressor -> Speakers (Destination)
+      source.connect(highpass);
+      highpass.connect(peaking);
+      peaking.connect(compressor);
+      compressor.connect(ctx.destination);
+    } catch (err) {
+      console.warn('[WebRTC Voice Clarity] Setup notice:', err);
+    }
+  }, []);
+
+  const toggleVoiceClarity = useCallback(() => {
+    setIsVoiceClarityEnabled((prev) => {
+      const next = !prev;
+      if (audioCtxRef.current && voiceClarityHighpassRef.current && voiceClarityPeakingRef.current) {
+        const ctx = audioCtxRef.current;
+        if (next) {
+          // Studio Vocal Clarity active
+          voiceClarityHighpassRef.current.frequency.setValueAtTime(80, ctx.currentTime);
+          voiceClarityPeakingRef.current.gain.setValueAtTime(4.5, ctx.currentTime);
+        } else {
+          // Flat bypass
+          voiceClarityHighpassRef.current.frequency.setValueAtTime(10, ctx.currentTime);
+          voiceClarityPeakingRef.current.gain.setValueAtTime(0, ctx.currentTime);
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleBackgroundBlur = useCallback(() => {
+    setIsBackgroundBlurEnabled((prev) => !prev);
+  }, []);
+
+  // 3. In-Call P2P DataChannel Chat: Send text message
+  const sendChatMessage = useCallback(
+    (text: string) => {
+      if (!text.trim() || !currentUser) return;
+      const id = 'msg-' + Math.random().toString(36).substring(2, 9);
+      const msgObj = {
+        type: 'chat',
+        id,
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        text: text.trim(),
+        timestamp: Date.now(),
+      };
+
+      setChatMessages((prev) => [...prev, { ...msgObj, isSelf: true }]);
+
+      if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+        try {
+          dataChannelRef.current.send(JSON.stringify(msgObj));
+        } catch (e) {
+          console.warn('[WebRTC DataChannel send chat error]:', e);
+        }
+      }
+    },
+    [currentUser],
+  );
+
+  // 4. In-Call P2P DataChannel Chunked File Sharing (16KB binary chunks with backpressure)
+  const sendFile = useCallback(
+    async (file: File) => {
+      if (!file || !currentUser) return;
+      const dc = dataChannelRef.current;
+      if (!dc || dc.readyState !== 'open') {
+        alert('Data connection is not ready yet. Please wait 2-3 seconds for connection to stabilize.');
+        return;
+      }
+
+      const fileId = 'file-' + Math.random().toString(36).substring(2, 9);
+      const chunkSize = 16384; // 16KB per chunk
+      const arrayBuffer = await file.arrayBuffer();
+      const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize);
+
+      setFileTransfers((prev) => ({
+        ...prev,
+        [fileId]: {
+          fileId,
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type,
+          progress: 0,
+          status: 'uploading',
+        },
+      }));
+
+      // 1. Send file start
+      dc.send(
+        JSON.stringify({
+          type: 'file_start',
+          fileId,
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type,
+          totalChunks,
+        }),
+      );
+
+      // 2. Send 16KB chunks with backpressure
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, arrayBuffer.byteLength);
+        const slice = arrayBuffer.slice(start, end);
+
+        const uint8 = new Uint8Array(slice);
+        let binary = '';
+        for (let b = 0; b < uint8.byteLength; b++) {
+          binary += String.fromCharCode(uint8[b]);
+        }
+        const base64Chunk = btoa(binary);
+
+        // Backpressure check
+        while (dc.bufferedAmount > 65536) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+
+        dc.send(
+          JSON.stringify({
+            type: 'file_chunk',
+            fileId,
+            chunkIndex: i,
+            chunk: base64Chunk,
+          }),
+        );
+
+        const progress = Math.min(100, Math.round(((i + 1) / totalChunks) * 100));
+        setFileTransfers((prev) => {
+          const cur = prev[fileId];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [fileId]: { ...cur, progress },
+          };
+        });
+      }
+
+      // 3. Send file end
+      dc.send(JSON.stringify({ type: 'file_end', fileId }));
+
+      const localBlobUrl = URL.createObjectURL(file);
+      setFileTransfers((prev) => {
+        const cur = prev[fileId];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [fileId]: { ...cur, progress: 100, status: 'completed', url: localBlobUrl },
+        };
+      });
+
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: 'msg-' + fileId,
+          senderId: currentUser.id,
+          senderName: currentUser.name,
+          text: `Shared file: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`,
+          timestamp: Date.now(),
+          isSelf: true,
+          file: {
+            fileId,
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type,
+            url: localBlobUrl,
+          },
+        },
+      ]);
+    },
+    [currentUser],
+  );
 
   // Acquire local camera and microphone stream with studio quality (1080p30 -> 720p30 -> Basic fallback cascade)
   const getMediaStream = useCallback(
@@ -502,11 +837,16 @@ export function useWebRTC(
           prevBytesReceivedRef.current = bytesReceived;
           prevTimestampRef.current = currentTimestamp;
 
-          const totalPackets = packetsLost + packetsReceived;
+          const deltaPacketsLost = Math.max(0, packetsLost - prevPacketsLostRef.current);
+          const deltaPacketsReceived = Math.max(0, packetsReceived - prevPacketsReceivedRef.current);
+          const deltaTotal = deltaPacketsLost + deltaPacketsReceived;
           const lossPercent =
-            totalPackets > 0
-              ? Math.round((packetsLost / totalPackets) * 1000) / 10
+            deltaTotal > 0
+              ? Math.round((deltaPacketsLost / deltaTotal) * 1000) / 10
               : 0;
+
+          prevPacketsLostRef.current = packetsLost;
+          prevPacketsReceivedRef.current = packetsReceived;
 
           // --- AUTOMATIC ADAPTIVE QUALITY ENGINE (Dynamic ABR) ---
           // Evaluates network health (loss, RTT, jitter) just like WhatsApp, Zoom & FaceTime
@@ -606,7 +946,7 @@ export function useWebRTC(
   // Reset all call states and hardware channels
   const resetCall = useCallback(() => {
     ringtone.stop();
-    releaseWakeLock();
+    stopKeepAlive();
 
     if (statsIntervalRef.current) {
       clearInterval(statsIntervalRef.current);
@@ -630,9 +970,24 @@ export function useWebRTC(
       localStreamRef.current = null;
     }
 
+    if (voiceClaritySourceRef.current) {
+      try {
+        voiceClaritySourceRef.current.disconnect();
+      } catch {}
+      voiceClaritySourceRef.current = null;
+    }
+
     remoteStreamRef.current = null;
     incomingOfferRef.current = null;
     pendingCandidates.current = [];
+    incomingFilesRef.current.clear();
+    setChatMessages([]);
+    setFileTransfers({});
+
+    prevPacketsLostRef.current = 0;
+    prevPacketsReceivedRef.current = 0;
+    prevBytesReceivedRef.current = 0;
+    prevTimestampRef.current = 0;
 
     setLocalStream(null);
     setRemoteStream(null);
@@ -646,7 +1001,7 @@ export function useWebRTC(
     setNetworkStats(null);
     activeTierRef.current = initialTier;
     stableCyclesRef.current = 0;
-  }, [releaseWakeLock, initialTier]);
+  }, [stopKeepAlive, initialTier]);
 
   // Initialize RTCPeerConnection with optimal ICE parameters and DataChannel
   const createPeerConnection = useCallback(
@@ -661,13 +1016,7 @@ export function useWebRTC(
 
       pcRef.current = pc;
 
-      // Setup negotiated DataChannel for ultra-low latency P2P control messages
-      try {
-        const dc = pc.createDataChannel('cn-bd-control', {
-          negotiated: true,
-          id: 0,
-        });
-
+      const setupDataChannelEvents = (dc: RTCDataChannel) => {
         dc.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
@@ -675,12 +1024,129 @@ export function useWebRTC(
               setIsPeerMuted(Boolean(data.isMuted));
             } else if (data.type === 'video_off') {
               setIsPeerVideoOff(Boolean(data.isVideoOff));
+            } else if (data.type === 'chat') {
+              const msg: ChatMessage = {
+                id: data.id || Math.random().toString(),
+                senderId: data.senderId,
+                senderName: data.senderName || peer.name || 'Peer',
+                text: data.text,
+                timestamp: data.timestamp || Date.now(),
+                isSelf: false,
+              };
+              setChatMessages((prev) => [...prev, msg]);
+            } else if (data.type === 'file_start') {
+              const { fileId, fileName, fileSize, fileType, totalChunks } = data;
+              incomingFilesRef.current.set(fileId, {
+                fileName,
+                fileSize,
+                fileType,
+                totalChunks,
+                chunks: [],
+              });
+              setFileTransfers((prev) => ({
+                ...prev,
+                [fileId]: {
+                  fileId,
+                  fileName,
+                  fileSize,
+                  fileType,
+                  progress: 0,
+                  status: 'downloading',
+                },
+              }));
+            } else if (data.type === 'file_chunk') {
+              const { fileId, chunkIndex, chunk } = data;
+              const fileData = incomingFilesRef.current.get(fileId);
+              if (fileData) {
+                fileData.chunks[chunkIndex] = chunk;
+                const receivedCount = fileData.chunks.filter(Boolean).length;
+                const progress = Math.min(100, Math.round((receivedCount / fileData.totalChunks) * 100));
+                setFileTransfers((prev) => {
+                  const cur = prev[fileId];
+                  if (!cur) return prev;
+                  return {
+                    ...prev,
+                    [fileId]: { ...cur, progress },
+                  };
+                });
+              }
+            } else if (data.type === 'file_end') {
+              const { fileId } = data;
+              const fileData = incomingFilesRef.current.get(fileId);
+              if (fileData) {
+                try {
+                  const binaryChunks: Uint8Array[] = fileData.chunks.map((b64) => {
+                    const binaryStr = atob(b64);
+                    const bytes = new Uint8Array(binaryStr.length);
+                    for (let i = 0; i < binaryStr.length; i++) {
+                      bytes[i] = binaryStr.charCodeAt(i);
+                    }
+                    return bytes;
+                  });
+                  const blob = new Blob(binaryChunks as any, {
+                    type: fileData.fileType || 'application/octet-stream',
+                  });
+                  const url = URL.createObjectURL(blob);
+
+                  setFileTransfers((prev) => {
+                    const cur = prev[fileId];
+                    if (!cur) return prev;
+                    return {
+                      ...prev,
+                      [fileId]: { ...cur, progress: 100, status: 'completed', url },
+                    };
+                  });
+
+                  setChatMessages((prev) => [
+                    ...prev,
+                    {
+                      id: 'file-' + fileId,
+                      senderId: peer.id,
+                      senderName: peer.name || 'Peer',
+                      text: `Shared file: ${fileData.fileName} (${(fileData.fileSize / 1024).toFixed(1)} KB)`,
+                      timestamp: Date.now(),
+                      isSelf: false,
+                      file: {
+                        fileId,
+                        fileName: fileData.fileName,
+                        fileSize: fileData.fileSize,
+                        fileType: fileData.fileType,
+                        url,
+                      },
+                    },
+                  ]);
+                } catch (err) {
+                  console.error('[WebRTC DataChannel] File assembly error:', err);
+                } finally {
+                  incomingFilesRef.current.delete(fileId);
+                }
+              }
+            } else if (data.type === 'file_cancel') {
+              const { fileId } = data;
+              incomingFilesRef.current.delete(fileId);
+              setFileTransfers((prev) => {
+                const cur = prev[fileId];
+                if (!cur) return prev;
+                return {
+                  ...prev,
+                  [fileId]: { ...cur, status: 'error' },
+                };
+              });
             }
           } catch (e) {
             console.warn('[WebRTC DataChannel parse error]:', e);
           }
         };
+      };
 
+      // Setup negotiated DataChannel for ultra-low latency P2P control & chat/file messages
+      try {
+        const dc = pc.createDataChannel('cn-bd-control', {
+          negotiated: true,
+          id: 0,
+        });
+
+        setupDataChannelEvents(dc);
         dataChannelRef.current = dc;
       } catch (dcErr) {
         console.warn('[WebRTC] Negotiated DataChannel notice:', dcErr);
@@ -689,18 +1155,7 @@ export function useWebRTC(
       pc.ondatachannel = (event) => {
         const dc = event.channel;
         dataChannelRef.current = dc;
-        dc.onmessage = (e) => {
-          try {
-            const data = JSON.parse(e.data);
-            if (data.type === 'mute') {
-              setIsPeerMuted(Boolean(data.isMuted));
-            } else if (data.type === 'video_off') {
-              setIsPeerVideoOff(Boolean(data.isVideoOff));
-            }
-          } catch (err) {
-            console.warn('[WebRTC DataChannel ondatachannel error]:', err);
-          }
-        };
+        setupDataChannelEvents(dc);
       };
 
       // Handle remote incoming audio & video tracks (Using event.streams[0] to prevent iOS WebKit frame drop)
@@ -727,9 +1182,16 @@ export function useWebRTC(
         remoteStreamRef.current = streamToUse;
         setRemoteStream(streamToUse);
 
+        if (event.track.kind === 'audio') {
+          initVoiceClarityFilter(streamToUse);
+        }
+
         event.track.onunmute = () => {
           console.log(`[WebRTC track onunmute] ${event.track.kind} unmuted and actively rendering`);
           setRemoteStream(streamToUse);
+          if (event.track.kind === 'audio') {
+            initVoiceClarityFilter(streamToUse);
+          }
         };
 
         event.track.onended = () => {
@@ -770,7 +1232,7 @@ export function useWebRTC(
         if (pc.connectionState === 'connected') {
           setCallState('connected');
           ringtone.stop();
-          acquireWakeLock();
+          startKeepAlive();
           startStatsMonitoring(pc);
           tuneSenderParameters(pc);
         } else if (pc.connectionState === 'failed') {
@@ -786,7 +1248,7 @@ export function useWebRTC(
 
       return pc;
     },
-    [fetchIceServers, resetCall, acquireWakeLock, startStatsMonitoring, tuneSenderParameters],
+    [fetchIceServers, resetCall, startKeepAlive, startStatsMonitoring, tuneSenderParameters, initVoiceClarityFilter],
   );
 
   // 1. INITIATE CALL (Outbound)
@@ -1260,6 +1722,10 @@ export function useWebRTC(
     isPeerVideoOff,
     isScreenSharing,
     networkStats,
+    chatMessages,
+    fileTransfers,
+    isVoiceClarityEnabled,
+    isBackgroundBlurEnabled,
     startCall,
     answerCall,
     rejectCall,
@@ -1270,5 +1736,9 @@ export function useWebRTC(
     toggleVideo,
     switchCamera,
     toggleScreenShare,
+    sendChatMessage,
+    sendFile,
+    toggleVoiceClarity,
+    toggleBackgroundBlur,
   };
 }
