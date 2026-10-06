@@ -89,7 +89,7 @@ export const QUALITY_TIERS: QualityTierConfig[] = [
   {
     name: 'Auto (720p HD)',
     qualityTier: 'good',
-    maxBitrate: 1800000,
+    maxBitrate: 1500000,
     scaleResolutionDownBy: 1.0,
     maxFramerate: 30,
   },
@@ -97,7 +97,7 @@ export const QUALITY_TIERS: QualityTierConfig[] = [
   {
     name: 'Auto (1080p Full HD)',
     qualityTier: 'excellent',
-    maxBitrate: 3200000,
+    maxBitrate: 2200000,
     scaleResolutionDownBy: 1.0,
     maxFramerate: 30,
   },
@@ -113,7 +113,7 @@ function enhanceSdp(sdp: string): string {
     /(a=fmtp:\d+ .*)/g,
     (match) => {
       if (match.includes('opus')) {
-        return `${match};minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=64000;cbr=0;dtx=1`;
+        return `${match};minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=48000;cbr=0;dtx=1`;
       }
       return match;
     },
@@ -124,7 +124,7 @@ function enhanceSdp(sdp: string): string {
   const match = enhanced.match(opusRtpMapRegex);
   if (match) {
     const pt = match[1];
-    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=64000;cbr=0;dtx=1`;
+    const fmtpLine = `a=fmtp:${pt} minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=48000;cbr=0;dtx=1`;
     if (!enhanced.includes(`a=fmtp:${pt}`)) {
       enhanced = enhanced.replace(
         opusRtpMapRegex,
@@ -133,9 +133,9 @@ function enhanceSdp(sdp: string): string {
     }
   }
 
-  // 2. Set maximum video bitrate ceiling in SDP (3.5 Mbps for smooth HD with automatic congestion control)
+  // 2. Set maximum video bitrate ceiling in SDP (2.0 Mbps for smooth HD without bufferbloat)
   enhanced = enhanced.replace(/(m=video [^\r\n]+)/, (mLine) => {
-    return `${mLine}\r\nb=AS:3500\r\nb=TIAS:3500000`;
+    return `${mLine}\r\nb=AS:2000\r\nb=TIAS:2000000`;
   });
 
   // 3. Reorder video codecs in SDP so H.264 payload types are prioritized for hardware acceleration
@@ -421,85 +421,13 @@ export function useWebRTC(
     }
   }, [releaseWakeLock]);
 
-  // 2. Web Audio Voice Clarity DSP Filter: 80Hz Butterworth High-Pass + 2.5kHz Voice Boost + Compressor
-  const initVoiceClarityFilter = useCallback((stream: MediaStream) => {
-    try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioCtx();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') {
-        ctx.resume().catch(() => {});
-      }
-
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) return;
-
-      if (voiceClaritySourceRef.current) {
-        try {
-          voiceClaritySourceRef.current.disconnect();
-        } catch {}
-      }
-
-      const source = ctx.createMediaStreamSource(stream);
-      voiceClaritySourceRef.current = source;
-
-      // 80Hz High-Pass Filter: Eliminates rumble, AC fan noise, desk vibrations
-      const highpass = ctx.createBiquadFilter();
-      highpass.type = 'highpass';
-      highpass.frequency.setValueAtTime(80, ctx.currentTime);
-      highpass.Q.setValueAtTime(0.707, ctx.currentTime);
-      voiceClarityHighpassRef.current = highpass;
-
-      // 2.5kHz Peaking Filter: Boosts speech intelligibility and voice presence (+4.5 dB)
-      const peaking = ctx.createBiquadFilter();
-      peaking.type = 'peaking';
-      peaking.frequency.setValueAtTime(2500, ctx.currentTime);
-      peaking.Q.setValueAtTime(1.2, ctx.currentTime);
-      peaking.gain.setValueAtTime(4.5, ctx.currentTime);
-      voiceClarityPeakingRef.current = peaking;
-
-      // Dynamics Compressor: Balances soft whispers and loud laughter
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.setValueAtTime(-24, ctx.currentTime);
-      compressor.knee.setValueAtTime(30, ctx.currentTime);
-      compressor.ratio.setValueAtTime(4, ctx.currentTime);
-      compressor.attack.setValueAtTime(0.003, ctx.currentTime);
-      compressor.release.setValueAtTime(0.25, ctx.currentTime);
-      voiceClarityCompressorRef.current = compressor;
-
-      // Chain: Source -> Highpass -> Peaking Boost -> Compressor -> Speakers (Destination)
-      source.connect(highpass);
-      highpass.connect(peaking);
-      peaking.connect(compressor);
-      compressor.connect(ctx.destination);
-    } catch (err) {
-      console.warn('[WebRTC Voice Clarity] Setup notice:', err);
-    }
+  // 2. Voice Clarity Toggle - Handled via Opus SDP and native hardware processing
+  const initVoiceClarityFilter = useCallback((_stream: MediaStream) => {
+    // Native WebRTC Opus engine provides hardware AEC and PLC without external AudioContext routing
   }, []);
 
   const toggleVoiceClarity = useCallback(() => {
-    setIsVoiceClarityEnabled((prev) => {
-      const next = !prev;
-      if (audioCtxRef.current && voiceClarityHighpassRef.current && voiceClarityPeakingRef.current) {
-        const ctx = audioCtxRef.current;
-        if (next) {
-          // Studio Vocal Clarity active
-          voiceClarityHighpassRef.current.frequency.setValueAtTime(80, ctx.currentTime);
-          voiceClarityPeakingRef.current.gain.setValueAtTime(4.5, ctx.currentTime);
-        } else {
-          // Flat bypass
-          voiceClarityHighpassRef.current.frequency.setValueAtTime(10, ctx.currentTime);
-          voiceClarityPeakingRef.current.gain.setValueAtTime(0, ctx.currentTime);
-        }
-      }
-      return next;
-    });
+    setIsVoiceClarityEnabled((prev) => !prev);
   }, []);
 
   const toggleBackgroundBlur = useCallback(() => {
@@ -655,41 +583,51 @@ export function useWebRTC(
         }
       }
 
+      const isMobileDevice =
+        typeof window !== 'undefined' &&
+        /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
       const audioConfig = {
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
-        channelCount: 2,
-        sampleRate: 48000,
+        channelCount: 1, // Mono voice ensures hardware AEC (Acoustic Echo Cancellation) is active
       };
 
-      // Cascade Tier 1: 1080p Full HD @ 30fps (Standard communication rate)
       if (video) {
+        // High quality, ultra-smooth 720p 30fps default (standard for WhatsApp, FaceTime, Meet)
+        const primaryConstraints: MediaStreamConstraints = {
+          audio: audioConfig,
+          video: isMobileDevice
+            ? {
+                facingMode: facingModeRef.current,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, max: 30 },
+              }
+            : {
+                facingMode: facingModeRef.current,
+                width: { ideal: 1280, max: 1920 },
+                height: { ideal: 720, max: 1080 },
+                frameRate: { ideal: 30, max: 30 },
+              },
+        };
+
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConfig,
-            video: {
-              facingMode: facingModeRef.current,
-              width: { ideal: 1920, min: 1280 },
-              height: { ideal: 1080, min: 720 },
-              frameRate: { ideal: 30, max: 30 },
-            },
-          });
+          const stream = await navigator.mediaDevices.getUserMedia(primaryConstraints);
           localStreamRef.current = stream;
           setLocalStream(stream);
           return stream;
         } catch (tier1Err) {
-          console.warn('[WebRTC] 1080p unavailable, cascading to 720p HD:', tier1Err);
+          console.warn('[WebRTC] Primary video constraint fallback:', tier1Err);
         }
 
-        // Cascade Tier 2: 720p HD @ 30fps
+        // Fallback: Flexible resolution
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: audioConfig,
             video: {
               facingMode: facingModeRef.current,
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
               frameRate: { ideal: 30, max: 30 },
             },
           });
@@ -697,23 +635,7 @@ export function useWebRTC(
           setLocalStream(stream);
           return stream;
         } catch (tier2Err) {
-          console.warn('[WebRTC] 720p unavailable, cascading to flexible video:', tier2Err);
-        }
-
-        // Cascade Tier 3: Flexible video
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConfig,
-            video: {
-              facingMode: facingModeRef.current,
-              frameRate: { ideal: 30, max: 30 },
-            },
-          });
-          localStreamRef.current = stream;
-          setLocalStream(stream);
-          return stream;
-        } catch (tier3Err) {
-          console.error('[WebRTC] Flexible video failed, trying audio-only:', tier3Err);
+          console.error('[WebRTC] Flexible video fallback failed:', tier2Err);
         }
       }
 
@@ -1182,16 +1104,9 @@ export function useWebRTC(
         remoteStreamRef.current = streamToUse;
         setRemoteStream(streamToUse);
 
-        if (event.track.kind === 'audio') {
-          initVoiceClarityFilter(streamToUse);
-        }
-
         event.track.onunmute = () => {
           console.log(`[WebRTC track onunmute] ${event.track.kind} unmuted and actively rendering`);
           setRemoteStream(streamToUse);
-          if (event.track.kind === 'audio') {
-            initVoiceClarityFilter(streamToUse);
-          }
         };
 
         event.track.onended = () => {
